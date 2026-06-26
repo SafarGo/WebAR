@@ -18,11 +18,12 @@ export default function CameraView() {
 
     async function startCamera() {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: 
-        {
-            facingMode: { ideal: 'environment' }
-        }
-      });
+  video: {
+    facingMode: { ideal: "environment" },
+    width: { ideal: 1280 },
+    height: { ideal: 720 }
+  }
+});
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
