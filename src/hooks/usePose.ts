@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { initPose } from "../services/poseService";
 
-export function usePose(videoRef: React.RefObject<HTMLVideoElement>) {
+export function usePose(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const requestRef = useRef<number | null>(null);
   const [ready, setReady] = useState(false);
 
