@@ -10,6 +10,7 @@ import { getPoseLandmarker } from "../services/poseService";
 export default function CameraView() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const { ready } = usePose(videoRef);
 
@@ -17,12 +18,13 @@ export default function CameraView() {
     let animationId: number;
 
     async function startCamera() {
-      // 🎥 1. КАМЕРА (задняя + HD)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          // не задаём жёстко 1920x1080 — пусть браузер сам выберет
+          // оптимальное под устройство, или ставим адекватный ideal:
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
         }
       });
 
@@ -36,10 +38,51 @@ export default function CameraView() {
 
       await video.play();
 
-      // 📐 2. СИНХРОНИЗАЦИЯ РАЗМЕРОВ (ВАЖНО для качества)
-      video.onloadedmetadata = () => {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+      // 📐 РАЗМЕР КАНВАСА = РАЗМЕР КОНТЕЙНЕРА (экрана), А НЕ ВИДЕО
+      const resizeCanvas = () => {
+        const container = containerRef.current!;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = container.clientWidth * dpr;
+        canvas.height = container.clientHeight * dpr;
+        canvas.style.width = `${container.clientWidth}px`;
+        canvas.style.height = `${container.clientHeight}px`;
+      };
+
+      resizeCanvas();
+      window.addEventListener("resize", resizeCanvas);
+
+      // Функция отрисовки видео по принципу object-fit: cover
+      const drawVideoCover = () => {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const cw = canvas.width;
+        const ch = canvas.height;
+
+        if (!vw || !vh) return;
+
+        const videoRatio = vw / vh;
+        const canvasRatio = cw / ch;
+
+        let sx, sy, sWidth, sHeight;
+
+        if (videoRatio > canvasRatio) {
+          // видео шире канваса -> обрезаем по горизонтали
+          sHeight = vh;
+          sWidth = vh * canvasRatio;
+          sx = (vw - sWidth) / 2;
+          sy = 0;
+        } else {
+          // видео выше канваса -> обрезаем по вертикали
+          sWidth = vw;
+          sHeight = vw / canvasRatio;
+          sx = 0;
+          sy = (vh - sHeight) / 2;
+        }
+
+        ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, cw, ch);
+
+        // возвращаем параметры кропа, если нужно пересчитывать координаты landmarks
+        return { sx, sy, sWidth, sHeight };
       };
 
       const detect = () => {
@@ -55,20 +98,24 @@ export default function CameraView() {
           performance.now()
         );
 
-        // 🧹 очистка canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // 📷 рисуем видео на canvas
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const crop = drawVideoCover();
 
-        const drawingUtils = new DrawingUtils(ctx);
-
-        // 🧍 рисуем скелет
-        if (results.landmarks) {
+        if (results.landmarks && crop) {
+          const drawingUtils = new DrawingUtils(ctx);
           for (const landmarks of results.landmarks) {
-            drawingUtils.drawLandmarks(landmarks);
+            // ВАЖНО: landmarks приходят в нормализованных координатах
+            // относительно ИСХОДНОГО видео, а не обрезанного канваса.
+            // Нужно пересчитать их под кроп, см. ниже.
+            const adjusted = landmarks.map((lm) => ({
+              ...lm,
+              x: ((lm.x * video.videoWidth - crop.sx) / crop.sWidth),
+              y: ((lm.y * video.videoHeight - crop.sy) / crop.sHeight)
+            }));
+            drawingUtils.drawLandmarks(adjusted);
             drawingUtils.drawConnectors(
-              landmarks,
+              adjusted,
               PoseLandmarker.POSE_CONNECTIONS
             );
           }
@@ -78,6 +125,8 @@ export default function CameraView() {
       };
 
       detect();
+
+      return () => window.removeEventListener("resize", resizeCanvas);
     }
 
     startCamera();
@@ -86,18 +135,26 @@ export default function CameraView() {
   }, []);
 
   return (
-    <div style={{ position: "relative" }}>
-      {/* скрытое видео */}
+    <div
+      ref={containerRef}
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden"
+      }}
+    >
       <video ref={videoRef} style={{ display: "none" }} />
 
-      {/* canvas с AR */}
       <canvas
         ref={canvasRef}
-        style={{ width: "100%", height: "auto" }}
+        style={{ display: "block" }}
       />
 
       {!ready && (
-        <p style={{ position: "absolute", top: 10, left: 10 }}>
+        <p style={{ position: "absolute", top: 10, left: 10, color: "#fff" }}>
           Loading pose model...
         </p>
       )}
