@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   DrawingUtils,
@@ -23,6 +23,10 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
 
+  // 🔑 флаг готовности Three.js сцены — без него эффект загрузки модели
+  // может сработать раньше, чем сцена создана внутри startCamera()
+  const [sceneReady, setSceneReady] = useState(false);
+
   // 🔑 актуальная одежда доступна внутри detect() без перезапуска камеры
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
 
@@ -34,26 +38,31 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   }, [selectedClothing]);
 
   // загрузка/замена 3D-модели при смене выбранной одежды
+  // ИЛИ когда сцена становится готовой (sceneReady)
   useEffect(() => {
     if (!selectedClothing || !sceneRef.current) return;
 
     let cancelled = false;
 
-    loadGarmentPivot(selectedClothing.model).then((pivot) => {
-      if (cancelled || !sceneRef.current) return;
+    loadGarmentPivot(selectedClothing.model)
+      .then((pivot) => {
+        if (cancelled || !sceneRef.current) return;
 
-      if (garmentRef.current) {
-        sceneRef.current.remove(garmentRef.current);
-      }
-      pivot.visible = false;
-      sceneRef.current.add(pivot);
-      garmentRef.current = pivot;
-    });
+        if (garmentRef.current) {
+          sceneRef.current.remove(garmentRef.current);
+        }
+        pivot.visible = false;
+        sceneRef.current.add(pivot);
+        garmentRef.current = pivot;
+      })
+      .catch((err) => {
+        console.error("Не удалось загрузить модель одежды:", err);
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedClothing]);
+  }, [selectedClothing, sceneReady]);
 
   // запуск камеры + рендер-цикл — запускается ОДИН РАЗ
   useEffect(() => {
@@ -99,6 +108,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
       camera.position.z = 1000;
 
       sceneRef.current = scene;
+      setSceneReady(true); // 🔑 триггерим повторный запуск эффекта загрузки модели
 
       const resizeCanvas = () => {
         const w = container.clientWidth;
