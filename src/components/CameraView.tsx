@@ -60,6 +60,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
     };
   }, [selectedClothing, sceneReady]);
 
+  // запуск камеры + рендер-цикл — запускается ОДИН РАЗ
   useEffect(() => {
     let animationId: number;
     let cleanupResize: (() => void) | undefined;
@@ -192,7 +193,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             const pivot = garmentRef.current;
             const clothing = selectedClothingRef.current;
 
-            // 🔑 универсальная привязка: какие landmarks брать за опорную линию
             const anchorPoint = clothing?.anchor ?? "shoulders";
             const { left: leftIdx, right: rightIdx } = ANCHOR_LANDMARKS[anchorPoint];
 
@@ -213,7 +213,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             const fitScale = clothing?.fitScale ?? 1.7;
             const scale = (refWidthPx * fitScale) / naturalWidth;
 
-            // доп. сдвиг вниз(+)/вверх(−) в пикселях
             const verticalOffsetPx = refWidthPx * (clothing?.verticalOffset ?? 0);
 
             pivot.scale.setScalar(scale);
@@ -223,13 +222,17 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
               0
             );
 
+            // 🔁 roll (наклон) с переключателем инверсии
             const rollAngle = Math.atan2(
               rightPt.y - leftPt.y,
               rightPt.x - leftPt.x
             );
-            pivot.rotation.z = -rollAngle;
+            const rollSign = clothing?.invertRoll ? 1 : -1;
+            pivot.rotation.z = rollSign * rollAngle;
 
-            const yawRaw = (rightPt.z - leftPt.z) * 4;
+            // 🔁 yaw (поворот корпуса) с переключателем инверсии
+            const yawSign = clothing?.invertYaw ? -1 : 1;
+            const yawRaw = yawSign * (rightPt.z - leftPt.z) * 4;
             pivot.rotation.y = THREE.MathUtils.clamp(yawRaw, -0.6, 0.6);
 
             pivot.visible = true;

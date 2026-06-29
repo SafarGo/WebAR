@@ -10,6 +10,8 @@ export interface ClothingItem {
   anchor?: AnchorPoint;     // к какой части тела привязываем (по умолчанию "shoulders")
   anchorEdge?: AnchorEdge;  // какой край модели совмещается с опорной линией (по умолчанию "top")
   verticalOffset?: number;  // доп. сдвиг: + вниз, − вверх, в долях от ширины опорной линии
+  invertRoll?: boolean;     // включи, если наклон тела вызывает обратный наклон модели
+  invertYaw?: boolean;      // включи, если поворот тела вызывает обратный поворот модели
 }
 
 export const clothes: ClothingItem[] = [
@@ -21,7 +23,9 @@ export const clothes: ClothingItem[] = [
     fitScale: 1.7,
     anchor: "shoulders",
     anchorEdge: "top",
-    verticalOffset: 0.2
+    verticalOffset: 0.2,
+    invertRoll: false,
+    invertYaw: false
   },
   {
     id: 2,
@@ -31,6 +35,8 @@ export const clothes: ClothingItem[] = [
     fitScale: 1,
     anchor: "shoulders",
     anchorEdge: "top",
-    verticalOffset: 0.3
+    verticalOffset: 0.7,
+    invertRoll: false,
+    invertYaw: false
   }
 ];
