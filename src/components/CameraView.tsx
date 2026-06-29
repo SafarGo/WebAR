@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import * as THREE from "three";
 import {
   DrawingUtils,
   PoseLandmarker
@@ -6,23 +7,65 @@ import {
 
 import { usePose } from "../hooks/usePose";
 import { getPoseLandmarker } from "../services/poseService";
+import { loadGarmentPivot } from "../services/garmentService";
+import type { ClothingItem } from "../data/clothes";
 
-export default function CameraView() {
+interface CameraViewProps {
+  selectedClothing: ClothingItem | null;
+}
+
+export default function CameraView({ selectedClothing }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const garmentRef = useRef<THREE.Group | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+
+  // 🔑 актуальная одежда доступна внутри detect() без перезапуска камеры
+  const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
 
   const { ready } = usePose(videoRef);
 
+  // обновляем ref при смене пропа
+  useEffect(() => {
+    selectedClothingRef.current = selectedClothing;
+  }, [selectedClothing]);
+
+  // загрузка/замена 3D-модели при смене выбранной одежды
+  useEffect(() => {
+    if (!selectedClothing || !sceneRef.current) return;
+
+    let cancelled = false;
+
+    loadGarmentPivot(selectedClothing.model).then((pivot) => {
+      if (cancelled || !sceneRef.current) return;
+
+      if (garmentRef.current) {
+        sceneRef.current.remove(garmentRef.current);
+      }
+      pivot.visible = false;
+      sceneRef.current.add(pivot);
+      garmentRef.current = pivot;
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedClothing]);
+
+  // запуск камеры + рендер-цикл — запускается ОДИН РАЗ
   useEffect(() => {
     let animationId: number;
+    let cleanupResize: (() => void) | undefined;
+    let stream: MediaStream | undefined;
+    let renderer: THREE.WebGLRenderer | undefined;
 
     async function startCamera() {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
-          // не задаём жёстко 1920x1080 — пусть браузер сам выберет
-          // оптимальное под устройство, или ставим адекватный ideal:
           width: { ideal: 1280 },
           height: { ideal: 720 }
         }
@@ -31,48 +74,73 @@ export default function CameraView() {
       const video = videoRef.current!;
       const canvas = canvasRef.current!;
       const ctx = canvas.getContext("2d")!;
+      const container = containerRef.current!;
 
       video.srcObject = stream;
       video.muted = true;
       video.playsInline = true;
-
       await video.play();
 
-      // 📐 РАЗМЕР КАНВАСА = РАЗМЕР КОНТЕЙНЕРА (экрана), А НЕ ВИДЕО
+      // 🧊 Three.js сцена для одежды
+      const scene = new THREE.Scene();
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(0, 1, 1);
+      scene.add(dirLight);
+
+      renderer = new THREE.WebGLRenderer({
+        canvas: threeCanvasRef.current!,
+        alpha: true,
+        antialias: true
+      });
+      renderer.setClearColor(0x000000, 0);
+
+      const camera = new THREE.OrthographicCamera(0, 0, 0, 0, 0.1, 2000);
+      camera.position.z = 1000;
+
+      sceneRef.current = scene;
+
       const resizeCanvas = () => {
-        const container = containerRef.current!;
-        const dpr = window.devicePixelRatio || 1;
-        canvas.width = container.clientWidth * dpr;
-        canvas.height = container.clientHeight * dpr;
-        canvas.style.width = `${container.clientWidth}px`;
-        canvas.style.height = `${container.clientHeight}px`;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        canvas.style.width = `${w}px`;
+        canvas.style.height = `${h}px`;
+
+        renderer!.setSize(w, h, false);
+        renderer!.setPixelRatio(dpr);
+
+        camera.left = 0;
+        camera.right = w * dpr;
+        camera.top = h * dpr;
+        camera.bottom = 0;
+        camera.updateProjectionMatrix();
       };
 
       resizeCanvas();
       window.addEventListener("resize", resizeCanvas);
+      cleanupResize = () => window.removeEventListener("resize", resizeCanvas);
 
-      // Функция отрисовки видео по принципу object-fit: cover
       const drawVideoCover = () => {
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         const cw = canvas.width;
         const ch = canvas.height;
-
-        if (!vw || !vh) return;
+        if (!vw || !vh) return null;
 
         const videoRatio = vw / vh;
         const canvasRatio = cw / ch;
-
-        let sx, sy, sWidth, sHeight;
+        let sx: number, sy: number, sWidth: number, sHeight: number;
 
         if (videoRatio > canvasRatio) {
-          // видео шире канваса -> обрезаем по горизонтали
           sHeight = vh;
           sWidth = vh * canvasRatio;
           sx = (vw - sWidth) / 2;
           sy = 0;
         } else {
-          // видео выше канваса -> обрезаем по вертикали
           sWidth = vw;
           sHeight = vw / canvasRatio;
           sx = 0;
@@ -80,10 +148,17 @@ export default function CameraView() {
         }
 
         ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, cw, ch);
-
-        // возвращаем параметры кропа, если нужно пересчитывать координаты landmarks
         return { sx, sy, sWidth, sHeight };
       };
+
+      const toCanvasPoint = (
+        lm: { x: number; y: number; z: number },
+        crop: { sx: number; sy: number; sWidth: number; sHeight: number }
+      ) => ({
+        x: ((lm.x * video.videoWidth - crop.sx) / crop.sWidth) * canvas.width,
+        y: ((lm.y * video.videoHeight - crop.sy) / crop.sHeight) * canvas.height,
+        z: lm.z
+      });
 
       const detect = () => {
         const poseLandmarker = getPoseLandmarker();
@@ -93,46 +168,79 @@ export default function CameraView() {
           return;
         }
 
-        const results = poseLandmarker.detectForVideo(
-          video,
-          performance.now()
-        );
+        const results = poseLandmarker.detectForVideo(video, performance.now());
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
         const crop = drawVideoCover();
 
-        if (results.landmarks && crop) {
-          const drawingUtils = new DrawingUtils(ctx);
-          for (const landmarks of results.landmarks) {
-            // ВАЖНО: landmarks приходят в нормализованных координатах
-            // относительно ИСХОДНОГО видео, а не обрезанного канваса.
-            // Нужно пересчитать их под кроп, см. ниже.
-            const adjusted = landmarks.map((lm) => ({
-              ...lm,
-              x: ((lm.x * video.videoWidth - crop.sx) / crop.sWidth),
-              y: ((lm.y * video.videoHeight - crop.sy) / crop.sHeight)
-            }));
-            drawingUtils.drawLandmarks(adjusted);
-            drawingUtils.drawConnectors(
-              adjusted,
-              PoseLandmarker.POSE_CONNECTIONS
+        const drawingUtils = new DrawingUtils(ctx);
+        const landmarksSet = results.landmarks?.[0];
+
+        if (landmarksSet && crop) {
+          const adjusted = landmarksSet.map((lm) => {
+            const p = toCanvasPoint(lm, crop);
+            return { ...lm, x: p.x / canvas.width, y: p.y / canvas.height };
+          });
+          drawingUtils.drawLandmarks(adjusted);
+          drawingUtils.drawConnectors(adjusted, PoseLandmarker.POSE_CONNECTIONS);
+
+          if (garmentRef.current) {
+            const pivot = garmentRef.current;
+            const leftShoulder = toCanvasPoint(landmarksSet[11], crop);
+            const rightShoulder = toCanvasPoint(landmarksSet[12], crop);
+
+            const chestCenter = {
+              x: (leftShoulder.x + rightShoulder.x) / 2,
+              y: (leftShoulder.y + rightShoulder.y) / 2
+            };
+
+            const shoulderWidthPx = Math.hypot(
+              rightShoulder.x - leftShoulder.x,
+              rightShoulder.y - leftShoulder.y
             );
+
+            const naturalWidth = pivot.userData.naturalWidth as number;
+            const fitScale = selectedClothingRef.current?.fitScale ?? 1.7;
+            const scale = (shoulderWidthPx * fitScale) / naturalWidth;
+
+            pivot.scale.setScalar(scale);
+            pivot.position.set(
+              chestCenter.x,
+              canvas.height - chestCenter.y,
+              0
+            );
+
+            const rollAngle = Math.atan2(
+              rightShoulder.y - leftShoulder.y,
+              rightShoulder.x - leftShoulder.x
+            );
+            pivot.rotation.z = -rollAngle;
+
+            const yawRaw = (rightShoulder.z - leftShoulder.z) * 4;
+            pivot.rotation.y = THREE.MathUtils.clamp(yawRaw, -0.6, 0.6);
+
+            pivot.visible = true;
           }
+        } else if (garmentRef.current) {
+          garmentRef.current.visible = false;
         }
 
+        renderer!.render(scene, camera);
         animationId = requestAnimationFrame(detect);
       };
 
       detect();
-
-      return () => window.removeEventListener("resize", resizeCanvas);
     }
 
     startCamera();
 
-    return () => cancelAnimationFrame(animationId);
-  }, []);
+    return () => {
+      cancelAnimationFrame(animationId);
+      cleanupResize?.();
+      stream?.getTracks().forEach((track) => track.stop());
+      renderer?.dispose();
+    };
+  }, []); // ← пусто и корректно: всё изменяемое читается через ref
 
   return (
     <div
@@ -150,7 +258,18 @@ export default function CameraView() {
 
       <canvas
         ref={canvasRef}
-        style={{ display: "block" }}
+        style={{ position: "absolute", top: 0, left: 0, display: "block" }}
+      />
+
+      <canvas
+        ref={threeCanvasRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          display: "block",
+          pointerEvents: "none"
+        }}
       />
 
       {!ready && (
