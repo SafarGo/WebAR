@@ -8,6 +8,7 @@ import {
 import { usePose } from "../hooks/usePose";
 import { getPoseLandmarker } from "../services/poseService";
 import { loadGarmentPivot } from "../services/garmentService";
+import { ANCHOR_LANDMARKS } from "../config/anchorLandmarks";
 import type { ClothingItem } from "../data/clothes";
 
 interface CameraViewProps {
@@ -23,28 +24,23 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
 
-  // 🔑 флаг готовности Three.js сцены — без него эффект загрузки модели
-  // может сработать раньше, чем сцена создана внутри startCamera()
   const [sceneReady, setSceneReady] = useState(false);
-
-  // 🔑 актуальная одежда доступна внутри detect() без перезапуска камеры
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
 
   const { ready } = usePose(videoRef);
 
-  // обновляем ref при смене пропа
   useEffect(() => {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
 
   // загрузка/замена 3D-модели при смене выбранной одежды
-  // ИЛИ когда сцена становится готовой (sceneReady)
   useEffect(() => {
     if (!selectedClothing || !sceneRef.current) return;
 
     let cancelled = false;
+    const anchorEdge = selectedClothing.anchorEdge ?? "top";
 
-    loadGarmentPivot(selectedClothing.model)
+    loadGarmentPivot(selectedClothing.model, anchorEdge)
       .then((pivot) => {
         if (cancelled || !sceneRef.current) return;
 
@@ -64,7 +60,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
     };
   }, [selectedClothing, sceneReady]);
 
-  // запуск камеры + рендер-цикл — запускается ОДИН РАЗ
   useEffect(() => {
     let animationId: number;
     let cleanupResize: (() => void) | undefined;
@@ -90,7 +85,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
       video.playsInline = true;
       await video.play();
 
-      // 🧊 Three.js сцена для одежды
       const scene = new THREE.Scene();
       scene.add(new THREE.AmbientLight(0xffffff, 1.2));
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -108,7 +102,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
       camera.position.z = 1000;
 
       sceneRef.current = scene;
-      setSceneReady(true); // 🔑 триггерим повторный запуск эффекта загрузки модели
+      setSceneReady(true);
 
       const resizeCanvas = () => {
         const w = container.clientWidth;
@@ -120,9 +114,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
         canvas.style.width = `${w}px`;
         canvas.style.height = `${h}px`;
 
-        // ВАЖНО: без updateStyle=true (или вызова без 3-го аргумента вовсе)
-        // canvas.style у threeCanvas не выставляется, и браузер показывает
-        // его в w*dpr × h*dpr CSS-пикселях — отсюда "куб на весь экран"
         renderer!.setSize(w, h);
         renderer!.setPixelRatio(dpr);
 
@@ -199,37 +190,46 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
           if (garmentRef.current) {
             const pivot = garmentRef.current;
-            const leftShoulder = toCanvasPoint(landmarksSet[11], crop);
-            const rightShoulder = toCanvasPoint(landmarksSet[12], crop);
+            const clothing = selectedClothingRef.current;
 
-            const chestCenter = {
-              x: (leftShoulder.x + rightShoulder.x) / 2,
-              y: (leftShoulder.y + rightShoulder.y) / 2
+            // 🔑 универсальная привязка: какие landmarks брать за опорную линию
+            const anchorPoint = clothing?.anchor ?? "shoulders";
+            const { left: leftIdx, right: rightIdx } = ANCHOR_LANDMARKS[anchorPoint];
+
+            const leftPt = toCanvasPoint(landmarksSet[leftIdx], crop);
+            const rightPt = toCanvasPoint(landmarksSet[rightIdx], crop);
+
+            const refCenter = {
+              x: (leftPt.x + rightPt.x) / 2,
+              y: (leftPt.y + rightPt.y) / 2
             };
 
-            const shoulderWidthPx = Math.hypot(
-              rightShoulder.x - leftShoulder.x,
-              rightShoulder.y - leftShoulder.y
+            const refWidthPx = Math.hypot(
+              rightPt.x - leftPt.x,
+              rightPt.y - leftPt.y
             );
 
             const naturalWidth = pivot.userData.naturalWidth as number;
-            const fitScale = selectedClothingRef.current?.fitScale ?? 1.7;
-            const scale = (shoulderWidthPx * fitScale) / naturalWidth;
+            const fitScale = clothing?.fitScale ?? 1.7;
+            const scale = (refWidthPx * fitScale) / naturalWidth;
+
+            // доп. сдвиг вниз(+)/вверх(−) в пикселях
+            const verticalOffsetPx = refWidthPx * (clothing?.verticalOffset ?? 0);
 
             pivot.scale.setScalar(scale);
             pivot.position.set(
-              chestCenter.x,
-              canvas.height - chestCenter.y,
+              refCenter.x,
+              canvas.height - (refCenter.y + verticalOffsetPx),
               0
             );
 
             const rollAngle = Math.atan2(
-              rightShoulder.y - leftShoulder.y,
-              rightShoulder.x - leftShoulder.x
+              rightPt.y - leftPt.y,
+              rightPt.x - leftPt.x
             );
             pivot.rotation.z = -rollAngle;
 
-            const yawRaw = (rightShoulder.z - leftShoulder.z) * 4;
+            const yawRaw = (rightPt.z - leftPt.z) * 4;
             pivot.rotation.y = THREE.MathUtils.clamp(yawRaw, -0.6, 0.6);
 
             pivot.visible = true;
@@ -253,7 +253,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
       stream?.getTracks().forEach((track) => track.stop());
       renderer?.dispose();
     };
-  }, []); // ← пусто и корректно: всё изменяемое читается через ref
+  }, []);
 
   return (
     <div
