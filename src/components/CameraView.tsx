@@ -7,7 +7,7 @@ import {
 
 import { usePose } from "../hooks/usePose";
 import { getPoseLandmarker } from "../services/poseService";
-import { loadGarmentPivot } from "../services/garmentService";
+import { loadGarmentSource, buildPivot } from "../services/garmentService";
 import { ANCHOR_LANDMARKS } from "../config/anchorLandmarks";
 import type { ClothingItem } from "../data/clothes";
 
@@ -23,6 +23,8 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const gltfSourceRef = useRef<THREE.Group | null>(null);
+  const loadedModelUrlRef = useRef<string | null>(null);
 
   const [sceneReady, setSceneReady] = useState(false);
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
@@ -44,15 +46,26 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   const [debugInvertYaw, setDebugInvertYaw] = useState(
     selectedClothing?.invertYaw ?? false
   );
+  const [debugRotX, setDebugRotX] = useState(
+    selectedClothing?.modelRotationOffset?.x ?? 0
+  );
+  const [debugRotY, setDebugRotY] = useState(
+    selectedClothing?.modelRotationOffset?.y ?? 0
+  );
+  const [debugRotZ, setDebugRotZ] = useState(
+    selectedClothing?.modelRotationOffset?.z ?? 0
+  );
 
-  // 🔑 "сброс состояния при смене пропа" — во время рендера, без useEffect.
-  // Так рекомендует сама документация React вместо setState внутри эффекта.
+  // 🔑 сброс debug-стейтов при смене товара — во время рендера, без setState в эффекте
   if (selectedClothing && selectedClothing.id !== lastClothingId) {
     setLastClothingId(selectedClothing.id);
     setDebugFitScale(selectedClothing.fitScale ?? 1);
     setDebugVerticalOffset(selectedClothing.verticalOffset ?? 0);
     setDebugInvertRoll(selectedClothing.invertRoll ?? false);
     setDebugInvertYaw(selectedClothing.invertYaw ?? false);
+    setDebugRotX(selectedClothing.modelRotationOffset?.x ?? 0);
+    setDebugRotY(selectedClothing.modelRotationOffset?.y ?? 0);
+    setDebugRotZ(selectedClothing.modelRotationOffset?.z ?? 0);
   }
 
   const debugFitScaleRef = useRef(debugFitScale);
@@ -78,37 +91,48 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
   const { ready } = usePose(videoRef);
 
-  // эта синхронизация безопасна — здесь нет setState, только мутация ref
   useEffect(() => {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
 
-  // загрузка/замена 3D-модели при смене выбранной одежды
+  // загрузка модели + (пере)сборка pivot —
+  // срабатывает при смене товара, готовности сцены, И при изменении debug-поворота
   useEffect(() => {
     if (!selectedClothing || !sceneRef.current) return;
 
     let cancelled = false;
     const anchorEdge = selectedClothing.anchorEdge ?? "top";
 
-    loadGarmentPivot(selectedClothing.model, anchorEdge)
-      .then((pivot) => {
-        if (cancelled || !sceneRef.current) return;
+    async function rebuild() {
+      if (loadedModelUrlRef.current !== selectedClothing!.model) {
+        gltfSourceRef.current = await loadGarmentSource(selectedClothing!.model);
+        loadedModelUrlRef.current = selectedClothing!.model;
+      }
 
-        if (garmentRef.current) {
-          sceneRef.current.remove(garmentRef.current);
-        }
-        pivot.visible = false;
-        sceneRef.current.add(pivot);
-        garmentRef.current = pivot;
-      })
-      .catch((err) => {
-        console.error("Не удалось загрузить модель одежды:", err);
+      if (cancelled || !sceneRef.current || !gltfSourceRef.current) return;
+
+      const pivot = buildPivot(gltfSourceRef.current, anchorEdge, {
+        x: debugRotX,
+        y: debugRotY,
+        z: debugRotZ
       });
+
+      if (garmentRef.current) {
+        sceneRef.current.remove(garmentRef.current);
+      }
+      pivot.visible = false;
+      sceneRef.current.add(pivot);
+      garmentRef.current = pivot;
+    }
+
+    rebuild().catch((err) => {
+      console.error("Не удалось загрузить/собрать модель одежды:", err);
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedClothing, sceneReady]);
+  }, [selectedClothing, sceneReady, debugRotX, debugRotY, debugRotZ]);
 
   // запуск камеры + рендер-цикл — запускается ОДИН РАЗ
   useEffect(() => {
@@ -353,12 +377,14 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             bottom: 0,
             left: 0,
             width: "100%",
-            background: "rgba(0,0,0,0.75)",
+            background: "rgba(0,0,0,0.8)",
             color: "#fff",
             padding: "12px 16px",
             fontSize: 13,
             fontFamily: "monospace",
-            boxSizing: "border-box"
+            boxSizing: "border-box",
+            maxHeight: "60vh",
+            overflowY: "auto"
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between" }}>
@@ -394,6 +420,45 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             />
           </label>
 
+          <label style={{ display: "block", marginTop: 8 }}>
+            modelRotation.x (наклон вперёд/назад): {debugRotX}°
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={debugRotX}
+              onChange={(e) => setDebugRotX(parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+
+          <label style={{ display: "block", marginTop: 8 }}>
+            modelRotation.y (поворот вокруг вертикали): {debugRotY}°
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={debugRotY}
+              onChange={(e) => setDebugRotY(parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+
+          <label style={{ display: "block", marginTop: 8 }}>
+            modelRotation.z (наклон влево/вправо, "перевёрнутость"): {debugRotZ}°
+            <input
+              type="range"
+              min={-180}
+              max={180}
+              step={1}
+              value={debugRotZ}
+              onChange={(e) => setDebugRotZ(parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+
           <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
             <label>
               <input
@@ -420,4 +485,4 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
       )}
     </div>
   );
-}
+} 
