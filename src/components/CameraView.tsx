@@ -120,7 +120,10 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
         canvas.style.width = `${w}px`;
         canvas.style.height = `${h}px`;
 
-        renderer!.setSize(w, h, false);
+        // ВАЖНО: без updateStyle=true (или вызова без 3-го аргумента вовсе)
+        // canvas.style у threeCanvas не выставляется, и браузер показывает
+        // его в w*dpr × h*dpr CSS-пикселях — отсюда "куб на весь экран"
+        renderer!.setSize(w, h);
         renderer!.setPixelRatio(dpr);
 
         camera.left = 0;
