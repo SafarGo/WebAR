@@ -27,8 +27,58 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   const [sceneReady, setSceneReady] = useState(false);
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
 
+  // 🛠 DEBUG-панель калибровки
+  const [debugMode, setDebugMode] = useState(true);
+  const [lastClothingId, setLastClothingId] = useState(
+    selectedClothing?.id ?? null
+  );
+  const [debugFitScale, setDebugFitScale] = useState(
+    selectedClothing?.fitScale ?? 1
+  );
+  const [debugVerticalOffset, setDebugVerticalOffset] = useState(
+    selectedClothing?.verticalOffset ?? 0
+  );
+  const [debugInvertRoll, setDebugInvertRoll] = useState(
+    selectedClothing?.invertRoll ?? false
+  );
+  const [debugInvertYaw, setDebugInvertYaw] = useState(
+    selectedClothing?.invertYaw ?? false
+  );
+
+  // 🔑 "сброс состояния при смене пропа" — во время рендера, без useEffect.
+  // Так рекомендует сама документация React вместо setState внутри эффекта.
+  if (selectedClothing && selectedClothing.id !== lastClothingId) {
+    setLastClothingId(selectedClothing.id);
+    setDebugFitScale(selectedClothing.fitScale ?? 1);
+    setDebugVerticalOffset(selectedClothing.verticalOffset ?? 0);
+    setDebugInvertRoll(selectedClothing.invertRoll ?? false);
+    setDebugInvertYaw(selectedClothing.invertYaw ?? false);
+  }
+
+  const debugFitScaleRef = useRef(debugFitScale);
+  const debugVerticalOffsetRef = useRef(debugVerticalOffset);
+  const debugInvertRollRef = useRef(debugInvertRoll);
+  const debugInvertYawRef = useRef(debugInvertYaw);
+
+  useEffect(() => {
+    debugFitScaleRef.current = debugFitScale;
+  }, [debugFitScale]);
+
+  useEffect(() => {
+    debugVerticalOffsetRef.current = debugVerticalOffset;
+  }, [debugVerticalOffset]);
+
+  useEffect(() => {
+    debugInvertRollRef.current = debugInvertRoll;
+  }, [debugInvertRoll]);
+
+  useEffect(() => {
+    debugInvertYawRef.current = debugInvertYaw;
+  }, [debugInvertYaw]);
+
   const { ready } = usePose(videoRef);
 
+  // эта синхронизация безопасна — здесь нет setState, только мутация ref
   useEffect(() => {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
@@ -210,10 +260,14 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             );
 
             const naturalWidth = pivot.userData.naturalWidth as number;
-            const fitScale = clothing?.fitScale ?? 1.7;
-            const scale = (refWidthPx * fitScale) / naturalWidth;
 
-            const verticalOffsetPx = refWidthPx * (clothing?.verticalOffset ?? 0);
+            const fitScale = debugFitScaleRef.current;
+            const verticalOffset = debugVerticalOffsetRef.current;
+            const invertRoll = debugInvertRollRef.current;
+            const invertYaw = debugInvertYawRef.current;
+
+            const scale = (refWidthPx * fitScale) / naturalWidth;
+            const verticalOffsetPx = refWidthPx * verticalOffset;
 
             pivot.scale.setScalar(scale);
             pivot.position.set(
@@ -222,16 +276,14 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
               0
             );
 
-            // 🔁 roll (наклон) с переключателем инверсии
             const rollAngle = Math.atan2(
               rightPt.y - leftPt.y,
               rightPt.x - leftPt.x
             );
-            const rollSign = clothing?.invertRoll ? 1 : -1;
+            const rollSign = invertRoll ? 1 : -1;
             pivot.rotation.z = rollSign * rollAngle;
 
-            // 🔁 yaw (поворот корпуса) с переключателем инверсии
-            const yawSign = clothing?.invertYaw ? -1 : 1;
+            const yawSign = invertYaw ? -1 : 1;
             const yawRaw = yawSign * (rightPt.z - leftPt.z) * 4;
             pivot.rotation.y = THREE.MathUtils.clamp(yawRaw, -0.6, 0.6);
 
@@ -292,6 +344,79 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
         <p style={{ position: "absolute", top: 10, left: 10, color: "#fff" }}>
           Loading pose model...
         </p>
+      )}
+
+      {debugMode && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 0,
+            left: 0,
+            width: "100%",
+            background: "rgba(0,0,0,0.75)",
+            color: "#fff",
+            padding: "12px 16px",
+            fontSize: 13,
+            fontFamily: "monospace",
+            boxSizing: "border-box"
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <strong>DEBUG: {selectedClothing?.name ?? "—"}</strong>
+            <button onClick={() => setDebugMode(false)}>скрыть</button>
+          </div>
+
+          <label style={{ display: "block", marginTop: 8 }}>
+            fitScale: {debugFitScale.toFixed(2)}
+            <input
+              type="range"
+              min={0.1}
+              max={3}
+              step={0.05}
+              value={debugFitScale}
+              onChange={(e) => setDebugFitScale(parseFloat(e.target.value))}
+              style={{ width: "100%" }}
+            />
+          </label>
+
+          <label style={{ display: "block", marginTop: 8 }}>
+            verticalOffset: {debugVerticalOffset.toFixed(2)}
+            <input
+              type="range"
+              min={-2}
+              max={2}
+              step={0.05}
+              value={debugVerticalOffset}
+              onChange={(e) =>
+                setDebugVerticalOffset(parseFloat(e.target.value))
+              }
+              style={{ width: "100%" }}
+            />
+          </label>
+
+          <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
+            <label>
+              <input
+                type="checkbox"
+                checked={debugInvertRoll}
+                onChange={(e) => setDebugInvertRoll(e.target.checked)}
+              />
+              invertRoll
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={debugInvertYaw}
+                onChange={(e) => setDebugInvertYaw(e.target.checked)}
+              />
+              invertYaw
+            </label>
+          </div>
+
+          <div style={{ marginTop: 8, opacity: 0.7 }}>
+            👉 скопируй эти значения в clothes.ts когда подберёшь
+          </div>
+        </div>
       )}
     </div>
   );

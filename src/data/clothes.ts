@@ -35,8 +35,8 @@ export const clothes: ClothingItem[] = [
     fitScale: 1,
     anchor: "shoulders",
     anchorEdge: "top",
-    verticalOffset: 0.7,
+    verticalOffset: 1.5,
     invertRoll: false,
-    invertYaw: false
+    invertYaw: true
   }
 ];
