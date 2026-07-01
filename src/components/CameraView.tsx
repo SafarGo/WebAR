@@ -127,7 +127,6 @@ export default function CameraView(props: CameraViewProps) {
         antialias: true
       });
       renderer.setClearColor(0x000000, 0);
-      renderer.shadowMap.enabled = true;
 
       sceneRef.current = scene;
       sceneReadyRef.current = true;
@@ -189,16 +188,12 @@ export default function CameraView(props: CameraViewProps) {
         z: lm.z
       });
 
-      // 🔑 правильный unproject: экранные coords (0-1) → world coords
-      // учитывает FOV и aspect ratio в отличие от прямого NDC
+      // screen coords (0-1) → Three.js world coords на плоскости z=0
       const screenToWorld = (nx: number, ny: number): THREE.Vector3 => {
         const ndcX = (nx - 0.5) * 2;
         const ndcY = -(ny - 0.5) * 2;
-
-        // вычисляем размер вьюпорта на плоскости z=0
         const halfH = CAM_Z * Math.tan(THREE.MathUtils.degToRad(FOV / 2));
         const halfW = halfH * camera.aspect;
-
         return new THREE.Vector3(ndcX * halfW, ndcY * halfH, 0);
       };
 
@@ -238,7 +233,7 @@ export default function CameraView(props: CameraViewProps) {
           const pivot = garmentRef.current;
           const clothing = selectedClothingRef.current;
 
-          // 🔑 переводим screen coords → world coords с учётом FOV и aspect
+          // позиция и масштаб из screenLandmarks → world
           const LSw = screenToWorld(screenLandmarks[11].x, screenLandmarks[11].y);
           const RSw = screenToWorld(screenLandmarks[12].x, screenLandmarks[12].y);
           const LHw = screenToWorld(screenLandmarks[23].x, screenLandmarks[23].y);
@@ -249,7 +244,6 @@ export default function CameraView(props: CameraViewProps) {
           const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
           const torsoHeightW = shoulderMidW.distanceTo(hipMidW);
 
-          // naturalWidth теперь нормализован (0-1), fitScale = множитель
           const naturalWidth = pivot.userData.naturalWidth as number;
           const naturalHeight = pivot.userData.naturalHeight as number;
 
@@ -260,52 +254,41 @@ export default function CameraView(props: CameraViewProps) {
           const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
           const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
           const scaleZ = scaleX * 0.3;
-
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          // позиция: центр плеч смещённый вниз
           const anchorPos = shoulderMidW.clone();
           anchorPos.y -= verticalOffset * torsoHeightW;
           pivot.position.copy(anchorPos);
 
-          // ориентация из worldLandmarks (Y инвертируем: MediaPipe Y↓, Three.js Y↑)
-          const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
-          const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
-          const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
-          const WRH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
+          // 🔑 ПРОСТАЯ ОРИЕНТАЦИЯ — только два угла, без makeBasis
 
-          const rightVec = new THREE.Vector3(
-            WRS.x - WLS.x,
-            WRS.y - WLS.y,
-            WRS.z - WLS.z
-          ).normalize();
-
-          const upVec = new THREE.Vector3(
-            (WLS.x + WRS.x) / 2 - (WLH.x + WRH.x) / 2,
-            (WLS.y + WRS.y) / 2 - (WLH.y + WRH.y) / 2,
-            (WLS.z + WRS.z) / 2 - (WLH.z + WRH.z) / 2
-          ).normalize();
-
-          const forwardVec = new THREE.Vector3()
-            .crossVectors(rightVec, upVec)
-            .normalize();
-
-          const bodyQ = new THREE.Quaternion().setFromRotationMatrix(
-            new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec)
+          // ROLL (Z) — угол линии плеч на экране
+          // screenLandmarks: y растёт ВНИЗ, поэтому знак уже правильный
+          const LS_s = screenLandmarks[11];
+          const RS_s = screenLandmarks[12];
+          const roll = -Math.atan2(
+            RS_s.y - LS_s.y,  // в экранных coords: +y вниз
+            RS_s.x - LS_s.x   // +x вправо
           );
 
-          const rot = clothing?.modelRotationOffset;
-          const correctionQ = new THREE.Quaternion().setFromEuler(
-            new THREE.Euler(
-              THREE.MathUtils.degToRad(rot?.x ?? 0),
-              THREE.MathUtils.degToRad(rot?.y ?? 0),
-              THREE.MathUtils.degToRad(rot?.z ?? 0)
-            )
+          // YAW (Y) — разница глубины плеч из worldLandmarks
+          // В MediaPipe: отрицательный Z = ближе к камере
+          // Если правое плечо (WRS.z) меньше левого (WLS.z) → правое ближе → поворот вправо
+          // В Three.js: отрицательный Y rotation = поворот вправо (по часовой сверху)
+          const WLS_z = worldLandmarks[11].z;
+          const WRS_z = worldLandmarks[12].z;
+          const yaw = (WRS_z - WLS_z) * 3;
+
+          // базовая ориентация из clothes.ts + roll + yaw
+          const corrRot = clothing?.modelRotationOffset ?? {};
+          pivot.rotation.order = "YXZ";
+          pivot.rotation.set(
+            THREE.MathUtils.degToRad(corrRot.x ?? 0),
+            yaw + THREE.MathUtils.degToRad(corrRot.y ?? 0),
+            roll + THREE.MathUtils.degToRad(corrRot.z ?? 0)
           );
 
-          pivot.quaternion.multiplyQuaternions(bodyQ, correctionQ);
           pivot.visible = true;
-
         } else if (garmentRef.current) {
           garmentRef.current.visible = false;
         }
