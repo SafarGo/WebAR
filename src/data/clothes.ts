@@ -12,8 +12,8 @@ export interface ClothingItem {
   name: string;
   image: string;
   model: string;
-  fitScaleX?: number;       // ширина модели / ширина плеч
-  fitScaleY?: number;       // высота модели / высота торса
+  fitScaleX?: number;
+  fitScaleY?: number;
   anchor?: AnchorPoint;
   anchorEdge?: AnchorEdge;
   verticalOffset?: number;
@@ -30,7 +30,7 @@ export const clothes: ClothingItem[] = [
     fitScaleY: 1.1,
     anchor: "shoulders",
     anchorEdge: "top",
-    verticalOffset: 0.1,
+    verticalOffset: 0.0,
     modelRotationOffset: { x: 0, y: 0, z: 0 }
   }
 ];

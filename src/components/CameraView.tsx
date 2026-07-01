@@ -128,8 +128,6 @@ export default function CameraView(props: CameraViewProps) {
       dirLight.position.set(0, 2, 3);
       scene.add(dirLight);
 
-      // 🔑 PerspectiveCamera — FOV и позиция не влияют на точность
-      // благодаря unproject, но должны быть разумными
       const w = container.clientWidth;
       const h = container.clientHeight;
       const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
@@ -223,7 +221,6 @@ export default function CameraView(props: CameraViewProps) {
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
-        // рисуем скелет по screenLandmarks
         if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
           const adjusted = screenLandmarks.map((lm) => {
@@ -237,37 +234,25 @@ export default function CameraView(props: CameraViewProps) {
           });
         }
 
-        // накладываем одежду
         if (screenLandmarks && worldLandmarks && garmentRef.current && cameraRef.current) {
           const pivot = garmentRef.current;
           const cam = cameraRef.current;
 
-          // 🔑 UNPROJECT: экранная точка (нормализованная 0-1) → world-координата
-          // Это ключевое решение — модель размещается точно там, где трекер
-          // видит тело, независимо от FOV и расстояния до камеры
           const unprojectPoint = (nx: number, ny: number, targetZ: number) => {
-            // переводим в NDC: x [-1,1], y [-1,1] (Y инвертируем)
             const ndc = new THREE.Vector3(nx * 2 - 1, -(ny * 2 - 1), 0.5);
             ndc.unproject(cam);
-
-            // строим луч от камеры через эту точку
             const dir = ndc.sub(cam.position).normalize();
-
-            // пересечение луча с плоскостью Z = targetZ
             const t = (targetZ - cam.position.z) / dir.z;
             return cam.position.clone().add(dir.multiplyScalar(t));
           };
 
-          // используем Z из worldLandmarks как глубину плоскости модели
           const avgShoulderZ = (worldLandmarks[11].z + worldLandmarks[12].z) / 2;
 
-          // unproject ключевых точек в world-пространство Three.js
           const LSw = unprojectPoint(screenLandmarks[11].x, screenLandmarks[11].y, avgShoulderZ);
           const RSw = unprojectPoint(screenLandmarks[12].x, screenLandmarks[12].y, avgShoulderZ);
           const LHw = unprojectPoint(screenLandmarks[23].x, screenLandmarks[23].y, avgShoulderZ);
           const RHw = unprojectPoint(screenLandmarks[24].x, screenLandmarks[24].y, avgShoulderZ);
 
-          // геометрия торса в world-единицах (теперь совпадает с экраном)
           const shoulderWidthW = LSw.distanceTo(RSw);
           const shoulderMidW = LSw.clone().add(RSw).multiplyScalar(0.5);
           const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
@@ -280,27 +265,25 @@ export default function CameraView(props: CameraViewProps) {
           const fitScaleY = debugFitScaleYRef.current;
           const verticalOffset = debugVerticalOffsetRef.current;
 
-          // масштаб X и Y независимо — учитываем реальные пропорции тела
           const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
           const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
           const scaleZ = (scaleX + scaleY) / 2;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          // позиция: центр торса + вертикальный сдвиг
           const torsoCenterW = shoulderMidW.clone().add(hipMidW).multiplyScalar(0.5);
           torsoCenterW.y -= verticalOffset * torsoHeightW;
           pivot.position.copy(torsoCenterW);
 
-          // 🔑 ориентация из worldLandmarks — честная 3D математика
+          // 🔑 ориентация: инвертируем rightVec чтобы forwardVec смотрел к камере
           const LS = worldLandmarks[11];
           const RS = worldLandmarks[12];
           const LH = worldLandmarks[23];
           const RH = worldLandmarks[24];
 
           const rightVec = new THREE.Vector3(
-            RS.x - LS.x,
-            RS.y - LS.y,
-            RS.z - LS.z
+            LS.x - RS.x,
+            LS.y - RS.y,
+            LS.z - RS.z
           ).normalize();
 
           const upVec = new THREE.Vector3(
@@ -419,7 +402,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
-            modelRotation.x (перевёрнутость): {debugRotX}°
+            modelRotation.x: {debugRotX}°
             <input type="range" min={-180} max={180} step={1}
               value={debugRotX}
               onChange={(e) => setDebugRotX(parseFloat(e.target.value))}
@@ -443,7 +426,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-            👉 скопируй в clothes.ts:<br />
+            👉 скопируй в clothes.ts когда подберёшь:<br />
             fitScaleX: {debugFitScaleX.toFixed(2)},
             fitScaleY: {debugFitScaleY.toFixed(2)},
             verticalOffset: {debugVerticalOffset.toFixed(2)},
