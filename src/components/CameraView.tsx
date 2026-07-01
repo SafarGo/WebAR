@@ -267,7 +267,6 @@ export default function CameraView(props: CameraViewProps) {
 
           const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
           const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
-          // 🔑 глубина = 30% от ширины — реальные пропорции футболки
           const scaleZ = scaleX * 0.3;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
@@ -275,11 +274,12 @@ export default function CameraView(props: CameraViewProps) {
           torsoCenterW.y -= verticalOffset * torsoHeightW;
           pivot.position.copy(torsoCenterW);
 
-          // 🔑 ориентация: базис из скелета + корректирующий поворот
-          const LS = worldLandmarks[11];
-          const RS = worldLandmarks[12];
-          const LH = worldLandmarks[23];
-          const RH = worldLandmarks[24];
+          // 🔑 инвертируем Y: в MediaPipe worldLandmarks Y растёт вниз,
+          // в Three.js Y растёт вверх — без этого upVec смотрит вниз
+          const LS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
+          const RS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
+          const LH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
+          const RH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
 
           const rightVec = new THREE.Vector3(
             LS.x - RS.x,
@@ -297,7 +297,6 @@ export default function CameraView(props: CameraViewProps) {
             .crossVectors(rightVec, upVec)
             .normalize();
 
-          // корректирующий поворот из слайдеров (при 0,0,0 = единичный quaternion)
           const correctionQ = new THREE.Quaternion().setFromEuler(
             new THREE.Euler(
               THREE.MathUtils.degToRad(debugRotXRef.current),
@@ -308,8 +307,6 @@ export default function CameraView(props: CameraViewProps) {
 
           const rotMatrix = new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec);
           const bodyQ = new THREE.Quaternion().setFromRotationMatrix(rotMatrix);
-
-          // итоговый поворот = поворот тела × коррекция
           pivot.quaternion.multiplyQuaternions(bodyQ, correctionQ);
 
           pivot.visible = true;
