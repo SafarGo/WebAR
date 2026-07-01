@@ -35,6 +35,7 @@ export default function CameraView(props: CameraViewProps) {
   const [lastClothingId, setLastClothingId] = useState(selectedClothing?.id ?? null);
   const [debugFitScaleX, setDebugFitScaleX] = useState(selectedClothing?.fitScaleX ?? 1.3);
   const [debugFitScaleY, setDebugFitScaleY] = useState(selectedClothing?.fitScaleY ?? 1.1);
+  const [debugScaleZ, setDebugScaleZ] = useState(0.3);
   const [debugVerticalOffset, setDebugVerticalOffset] = useState(selectedClothing?.verticalOffset ?? 0.0);
   const [debugRotX, setDebugRotX] = useState(selectedClothing?.modelRotationOffset?.x ?? 0);
   const [debugRotY, setDebugRotY] = useState(selectedClothing?.modelRotationOffset?.y ?? 0);
@@ -52,6 +53,7 @@ export default function CameraView(props: CameraViewProps) {
 
   const debugFitScaleXRef = useRef(debugFitScaleX);
   const debugFitScaleYRef = useRef(debugFitScaleY);
+  const debugScaleZRef = useRef(debugScaleZ);
   const debugVerticalOffsetRef = useRef(debugVerticalOffset);
   const debugRotXRef = useRef(debugRotX);
   const debugRotYRef = useRef(debugRotY);
@@ -59,6 +61,7 @@ export default function CameraView(props: CameraViewProps) {
 
   useEffect(() => { debugFitScaleXRef.current = debugFitScaleX; }, [debugFitScaleX]);
   useEffect(() => { debugFitScaleYRef.current = debugFitScaleY; }, [debugFitScaleY]);
+  useEffect(() => { debugScaleZRef.current = debugScaleZ; }, [debugScaleZ]);
   useEffect(() => { debugVerticalOffsetRef.current = debugVerticalOffset; }, [debugVerticalOffset]);
   useEffect(() => { debugRotXRef.current = debugRotX; }, [debugRotX]);
   useEffect(() => { debugRotYRef.current = debugRotY; }, [debugRotY]);
@@ -267,7 +270,7 @@ export default function CameraView(props: CameraViewProps) {
 
           const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
           const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
-          const scaleZ = scaleX * 0.3;
+          const scaleZ = scaleX * debugScaleZRef.current;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
           const torsoCenterW = shoulderMidW.clone().add(hipMidW).multiplyScalar(0.5);
@@ -275,7 +278,7 @@ export default function CameraView(props: CameraViewProps) {
           pivot.position.copy(torsoCenterW);
 
           // 🔑 инвертируем Y: в MediaPipe worldLandmarks Y растёт вниз,
-          // в Three.js Y растёт вверх — без этого upVec смотрит вниз
+          // в Three.js Y растёт вверх
           const LS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
           const RS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
           const LH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
@@ -404,6 +407,14 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
+            scaleZ (объём/глубина): {debugScaleZ.toFixed(2)}
+            <input type="range" min={0.05} max={2} step={0.05}
+              value={debugScaleZ}
+              onChange={(e) => setDebugScaleZ(parseFloat(e.target.value))}
+              style={{ width: "100%" }} />
+          </label>
+
+          <label style={{ display: "block", marginTop: 8 }}>
             verticalOffset (+ вниз / − вверх): {debugVerticalOffset.toFixed(2)}
             <input type="range" min={-0.5} max={0.5} step={0.01}
               value={debugVerticalOffset}
@@ -439,6 +450,7 @@ export default function CameraView(props: CameraViewProps) {
             👉 скопируй в clothes.ts когда подберёшь:<br />
             fitScaleX: {debugFitScaleX.toFixed(2)},
             fitScaleY: {debugFitScaleY.toFixed(2)},
+            scaleZ: {debugScaleZ.toFixed(2)},
             verticalOffset: {debugVerticalOffset.toFixed(2)},
             modelRotationOffset: {`{ x: ${debugRotX}, y: ${debugRotY}, z: ${debugRotZ} }`}
           </div>
