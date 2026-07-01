@@ -36,7 +36,7 @@ export default function CameraView(props: CameraViewProps) {
   const [lastClothingId, setLastClothingId] = useState(selectedClothing?.id ?? null);
   const [debugFitScaleX, setDebugFitScaleX] = useState(selectedClothing?.fitScaleX ?? 1.3);
   const [debugFitScaleY, setDebugFitScaleY] = useState(selectedClothing?.fitScaleY ?? 1.1);
-  const [debugVerticalOffset, setDebugVerticalOffset] = useState(selectedClothing?.verticalOffset ?? 0.1);
+  const [debugVerticalOffset, setDebugVerticalOffset] = useState(selectedClothing?.verticalOffset ?? 0.0);
   const [debugRotX, setDebugRotX] = useState(selectedClothing?.modelRotationOffset?.x ?? 0);
   const [debugRotY, setDebugRotY] = useState(selectedClothing?.modelRotationOffset?.y ?? 0);
   const [debugRotZ, setDebugRotZ] = useState(selectedClothing?.modelRotationOffset?.z ?? 0);
@@ -45,7 +45,7 @@ export default function CameraView(props: CameraViewProps) {
     setLastClothingId(selectedClothing.id);
     setDebugFitScaleX(selectedClothing.fitScaleX ?? 1.3);
     setDebugFitScaleY(selectedClothing.fitScaleY ?? 1.1);
-    setDebugVerticalOffset(selectedClothing.verticalOffset ?? 0.1);
+    setDebugVerticalOffset(selectedClothing.verticalOffset ?? 0.0);
     setDebugRotX(selectedClothing.modelRotationOffset?.x ?? 0);
     setDebugRotY(selectedClothing.modelRotationOffset?.y ?? 0);
     setDebugRotZ(selectedClothing.modelRotationOffset?.z ?? 0);
@@ -77,11 +77,15 @@ export default function CameraView(props: CameraViewProps) {
       }
       if (cancelled || !sceneRef.current || !gltfSourceRef.current) return;
 
-      const pivot = buildPivot(gltfSourceRef.current, selectedClothing!.anchorEdge ?? "top", {
-        x: debugRotX,
-        y: debugRotY,
-        z: debugRotZ
-      });
+      const pivot = buildPivot(
+        gltfSourceRef.current,
+        selectedClothing!.anchorEdge ?? "top",
+        {
+          x: debugRotX,
+          y: debugRotY,
+          z: debugRotZ
+        }
+      );
 
       if (garmentRef.current) sceneRef.current.remove(garmentRef.current);
       pivot.visible = false;
@@ -124,14 +128,13 @@ export default function CameraView(props: CameraViewProps) {
       dirLight.position.set(0, 2, 3);
       scene.add(dirLight);
 
+      // 🔑 PerspectiveCamera — FOV и позиция не влияют на точность
+      // благодаря unproject, но должны быть разумными
       const w = container.clientWidth;
       const h = container.clientHeight;
       const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
-      // MediaPipe worldLandmarks: origin = центр бёдер, Z = глубина от камеры
-      // Плечи у нас на Y=-0.46, значит камера должна смотреть примерно
-      // на уровень центра торса (Y≈-0.23) с небольшого расстояния
-      camera.position.set(0, -0.23, 1.2);
-      camera.lookAt(0, -0.23, 0);
+      camera.position.set(0, 0, 2);
+      camera.lookAt(0, 0, 0);
       cameraRef.current = camera;
 
       renderer = new THREE.WebGLRenderer({
@@ -145,19 +148,19 @@ export default function CameraView(props: CameraViewProps) {
       setSceneReady(true);
 
       const resizeCanvas = () => {
-        const w = container.clientWidth;
-        const h = container.clientHeight;
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-        canvas.style.width = `${w}px`;
-        canvas.style.height = `${h}px`;
+        canvas.width = cw * dpr;
+        canvas.height = ch * dpr;
+        canvas.style.width = `${cw}px`;
+        canvas.style.height = `${ch}px`;
 
-        renderer!.setSize(w, h);
+        renderer!.setSize(cw, ch);
         renderer!.setPixelRatio(dpr);
 
-        camera.aspect = w / h;
+        camera.aspect = cw / ch;
         camera.updateProjectionMatrix();
       };
 
@@ -220,7 +223,7 @@ export default function CameraView(props: CameraViewProps) {
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
-        // рисуем скелет
+        // рисуем скелет по screenLandmarks
         if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
           const adjusted = screenLandmarks.map((lm) => {
@@ -234,27 +237,41 @@ export default function CameraView(props: CameraViewProps) {
           });
         }
 
-        // накладываем одежду по worldLandmarks
-        if (worldLandmarks && garmentRef.current) {
+        // накладываем одежду
+        if (screenLandmarks && worldLandmarks && garmentRef.current && cameraRef.current) {
           const pivot = garmentRef.current;
+          const cam = cameraRef.current;
 
-          const LS = worldLandmarks[11]; // левое плечо
-          const RS = worldLandmarks[12]; // правое плечо
-          const LH = worldLandmarks[23]; // левое бедро
-          const RH = worldLandmarks[24]; // правое бедро
+          // 🔑 UNPROJECT: экранная точка (нормализованная 0-1) → world-координата
+          // Это ключевое решение — модель размещается точно там, где трекер
+          // видит тело, независимо от FOV и расстояния до камеры
+          const unprojectPoint = (nx: number, ny: number, targetZ: number) => {
+            // переводим в NDC: x [-1,1], y [-1,1] (Y инвертируем)
+            const ndc = new THREE.Vector3(nx * 2 - 1, -(ny * 2 - 1), 0.5);
+            ndc.unproject(cam);
 
-          // центр торса
-          const torsoCenter = new THREE.Vector3(
-            (LS.x + RS.x + LH.x + RH.x) / 4,
-            (LS.y + RS.y + LH.y + RH.y) / 4,
-            (LS.z + RS.z + LH.z + RH.z) / 4
-          );
+            // строим луч от камеры через эту точку
+            const dir = ndc.sub(cam.position).normalize();
 
-          // ширина плеч и высота торса в метрах
-          const shoulderWidthM = Math.hypot(RS.x - LS.x, RS.y - LS.y, RS.z - LS.z);
-          const shoulderMidY = (LS.y + RS.y) / 2;
-          const hipMidY = (LH.y + RH.y) / 2;
-          const torsoHeightM = Math.abs(shoulderMidY - hipMidY);
+            // пересечение луча с плоскостью Z = targetZ
+            const t = (targetZ - cam.position.z) / dir.z;
+            return cam.position.clone().add(dir.multiplyScalar(t));
+          };
+
+          // используем Z из worldLandmarks как глубину плоскости модели
+          const avgShoulderZ = (worldLandmarks[11].z + worldLandmarks[12].z) / 2;
+
+          // unproject ключевых точек в world-пространство Three.js
+          const LSw = unprojectPoint(screenLandmarks[11].x, screenLandmarks[11].y, avgShoulderZ);
+          const RSw = unprojectPoint(screenLandmarks[12].x, screenLandmarks[12].y, avgShoulderZ);
+          const LHw = unprojectPoint(screenLandmarks[23].x, screenLandmarks[23].y, avgShoulderZ);
+          const RHw = unprojectPoint(screenLandmarks[24].x, screenLandmarks[24].y, avgShoulderZ);
+
+          // геометрия торса в world-единицах (теперь совпадает с экраном)
+          const shoulderWidthW = LSw.distanceTo(RSw);
+          const shoulderMidW = LSw.clone().add(RSw).multiplyScalar(0.5);
+          const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
+          const torsoHeightW = shoulderMidW.distanceTo(hipMidW);
 
           const naturalWidth = pivot.userData.naturalWidth as number;
           const naturalHeight = pivot.userData.naturalHeight as number;
@@ -263,20 +280,23 @@ export default function CameraView(props: CameraViewProps) {
           const fitScaleY = debugFitScaleYRef.current;
           const verticalOffset = debugVerticalOffsetRef.current;
 
-          // масштабируем X и Y независимо
-          const scaleX = (shoulderWidthM * fitScaleX) / naturalWidth;
-          const scaleY = (torsoHeightM * fitScaleY) / naturalHeight;
+          // масштаб X и Y независимо — учитываем реальные пропорции тела
+          const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
+          const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
+          const scaleZ = (scaleX + scaleY) / 2;
+          pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          pivot.scale.set(scaleX, scaleY, (scaleX + scaleY) / 2);
+          // позиция: центр торса + вертикальный сдвиг
+          const torsoCenterW = shoulderMidW.clone().add(hipMidW).multiplyScalar(0.5);
+          torsoCenterW.y -= verticalOffset * torsoHeightW;
+          pivot.position.copy(torsoCenterW);
 
-          // позиция: центр торса + небольшой сдвиг вниз
-          pivot.position.set(
-            torsoCenter.x,
-            torsoCenter.y - verticalOffset * torsoHeightM,
-            torsoCenter.z
-          );
+          // 🔑 ориентация из worldLandmarks — честная 3D математика
+          const LS = worldLandmarks[11];
+          const RS = worldLandmarks[12];
+          const LH = worldLandmarks[23];
+          const RH = worldLandmarks[24];
 
-          // 🔑 ориентация через 3D-векторы
           const rightVec = new THREE.Vector3(
             RS.x - LS.x,
             RS.y - LS.y,
@@ -360,13 +380,13 @@ export default function CameraView(props: CameraViewProps) {
           bottom: 0,
           left: 0,
           width: "100%",
-          background: "rgba(0,0,0,0.8)",
+          background: "rgba(0,0,0,0.82)",
           color: "#fff",
           padding: "12px 16px",
           fontSize: 13,
           fontFamily: "monospace",
           boxSizing: "border-box",
-          maxHeight: "55vh",
+          maxHeight: "60vh",
           overflowY: "auto"
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
@@ -399,7 +419,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
-            modelRotation.x: {debugRotX}°
+            modelRotation.x (перевёрнутость): {debugRotX}°
             <input type="range" min={-180} max={180} step={1}
               value={debugRotX}
               onChange={(e) => setDebugRotX(parseFloat(e.target.value))}
@@ -423,8 +443,9 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-            👉 скопируй в clothes.ts когда подберёшь:<br />
-            fitScaleX: {debugFitScaleX.toFixed(2)}, fitScaleY: {debugFitScaleY.toFixed(2)},
+            👉 скопируй в clothes.ts:<br />
+            fitScaleX: {debugFitScaleX.toFixed(2)},
+            fitScaleY: {debugFitScaleY.toFixed(2)},
             verticalOffset: {debugVerticalOffset.toFixed(2)},
             modelRotationOffset: {`{ x: ${debugRotX}, y: ${debugRotY}, z: ${debugRotZ} }`}
           </div>
