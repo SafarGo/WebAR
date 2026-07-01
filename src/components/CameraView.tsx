@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import {
   DrawingUtils,
@@ -24,48 +24,11 @@ export default function CameraView(props: CameraViewProps) {
 
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const gltfSourceRef = useRef<THREE.Group | null>(null);
   const loadedModelUrlRef = useRef<string | null>(null);
 
-  const [sceneReady, setSceneReady] = useState(false);
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
-
-  const [debugMode, setDebugMode] = useState(true);
-  const [lastClothingId, setLastClothingId] = useState(selectedClothing?.id ?? null);
-  const [debugFitScaleX, setDebugFitScaleX] = useState(selectedClothing?.fitScaleX ?? 1.3);
-  const [debugFitScaleY, setDebugFitScaleY] = useState(selectedClothing?.fitScaleY ?? 1.1);
-  const [debugScaleZ, setDebugScaleZ] = useState(0.3);
-  const [debugVerticalOffset, setDebugVerticalOffset] = useState(selectedClothing?.verticalOffset ?? 0.0);
-  const [debugRotX, setDebugRotX] = useState(selectedClothing?.modelRotationOffset?.x ?? 0);
-  const [debugRotY, setDebugRotY] = useState(selectedClothing?.modelRotationOffset?.y ?? 0);
-  const [debugRotZ, setDebugRotZ] = useState(selectedClothing?.modelRotationOffset?.z ?? 0);
-
-  if (selectedClothing && selectedClothing.id !== lastClothingId) {
-    setLastClothingId(selectedClothing.id);
-    setDebugFitScaleX(selectedClothing.fitScaleX ?? 1.3);
-    setDebugFitScaleY(selectedClothing.fitScaleY ?? 1.1);
-    setDebugVerticalOffset(selectedClothing.verticalOffset ?? 0.0);
-    setDebugRotX(selectedClothing.modelRotationOffset?.x ?? 0);
-    setDebugRotY(selectedClothing.modelRotationOffset?.y ?? 0);
-    setDebugRotZ(selectedClothing.modelRotationOffset?.z ?? 0);
-  }
-
-  const debugFitScaleXRef = useRef(debugFitScaleX);
-  const debugFitScaleYRef = useRef(debugFitScaleY);
-  const debugScaleZRef = useRef(debugScaleZ);
-  const debugVerticalOffsetRef = useRef(debugVerticalOffset);
-  const debugRotXRef = useRef(debugRotX);
-  const debugRotYRef = useRef(debugRotY);
-  const debugRotZRef = useRef(debugRotZ);
-
-  useEffect(() => { debugFitScaleXRef.current = debugFitScaleX; }, [debugFitScaleX]);
-  useEffect(() => { debugFitScaleYRef.current = debugFitScaleY; }, [debugFitScaleY]);
-  useEffect(() => { debugScaleZRef.current = debugScaleZ; }, [debugScaleZ]);
-  useEffect(() => { debugVerticalOffsetRef.current = debugVerticalOffset; }, [debugVerticalOffset]);
-  useEffect(() => { debugRotXRef.current = debugRotX; }, [debugRotX]);
-  useEffect(() => { debugRotYRef.current = debugRotY; }, [debugRotY]);
-  useEffect(() => { debugRotZRef.current = debugRotZ; }, [debugRotZ]);
+  const sceneReadyRef = useRef(false);
 
   const { ready } = usePose(videoRef);
 
@@ -73,19 +36,23 @@ export default function CameraView(props: CameraViewProps) {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
 
+  // загрузка модели при смене одежды
   useEffect(() => {
-    if (!selectedClothing || !sceneRef.current) return;
+    if (!selectedClothing) return;
+
     let cancelled = false;
 
     async function rebuild() {
+      // ждём пока сцена будет готова
+      if (!sceneRef.current) return;
+
       if (loadedModelUrlRef.current !== selectedClothing!.model) {
         gltfSourceRef.current = await loadGarmentSource(selectedClothing!.model);
         loadedModelUrlRef.current = selectedClothing!.model;
       }
+
       if (cancelled || !sceneRef.current || !gltfSourceRef.current) return;
 
-      // 🔑 "center" — origin в центре модели, не на верхнем крае
-      // Это позволяет правильно позиционировать по центру плеч
       const pivot = buildPivot(
         gltfSourceRef.current,
         "center",
@@ -98,9 +65,24 @@ export default function CameraView(props: CameraViewProps) {
       garmentRef.current = pivot;
     }
 
-    rebuild().catch(console.error);
+    // если сцена ещё не готова — ждём через интервал
+    const tryRebuild = () => {
+      if (sceneReadyRef.current) {
+        rebuild().catch(console.error);
+      } else {
+        const interval = setInterval(() => {
+          if (sceneReadyRef.current) {
+            clearInterval(interval);
+            rebuild().catch(console.error);
+          }
+        }, 100);
+        return () => clearInterval(interval);
+      }
+    };
+
+    tryRebuild();
     return () => { cancelled = true; };
-  }, [selectedClothing, sceneReady]);
+  }, [selectedClothing]);
 
   useEffect(() => {
     let animationId: number;
@@ -133,12 +115,13 @@ export default function CameraView(props: CameraViewProps) {
       dirLight.position.set(0, 2, 3);
       scene.add(dirLight);
 
+      // камера смотрит в (0,0,0) с позиции z=2
+      // объекты на z=0 в NDC координатах отображаются 1-к-1 на экран
       const w = container.clientWidth;
       const h = container.clientHeight;
       const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
       camera.position.set(0, 0, 2);
       camera.lookAt(0, 0, 0);
-      cameraRef.current = camera;
 
       renderer = new THREE.WebGLRenderer({
         canvas: threeCanvasRef.current!,
@@ -148,7 +131,7 @@ export default function CameraView(props: CameraViewProps) {
       renderer.setClearColor(0x000000, 0);
 
       sceneRef.current = scene;
-      setSceneReady(true);
+      sceneReadyRef.current = true;
 
       const resizeCanvas = () => {
         const cw = container.clientWidth;
@@ -226,6 +209,7 @@ export default function CameraView(props: CameraViewProps) {
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
+        // рисуем скелет
         if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
           const adjusted = screenLandmarks.map((lm) => {
@@ -239,87 +223,95 @@ export default function CameraView(props: CameraViewProps) {
           });
         }
 
-        if (screenLandmarks && worldLandmarks && garmentRef.current && cameraRef.current) {
+        if (screenLandmarks && worldLandmarks && garmentRef.current) {
           const pivot = garmentRef.current;
-          const cam = cameraRef.current;
+          const clothing = selectedClothingRef.current;
 
-          const unprojectPoint = (nx: number, ny: number, targetZ: number) => {
-            const ndc = new THREE.Vector3(nx * 2 - 1, -(ny * 2 - 1), 0.5);
-            ndc.unproject(cam);
-            const dir = ndc.sub(cam.position).normalize();
-            const t = (targetZ - cam.position.z) / dir.z;
-            return cam.position.clone().add(dir.multiplyScalar(t));
+          // 🔑 ПРОСТОЙ СПОСОБ: screenLandmarks (0..1) → NDC (-1..1)
+          // x: 0..1 → -1..1
+          // y: 0..1 → 1..-1 (инвертируем Y — в экране Y вниз, в NDC вверх)
+          const toNDC = (lm: { x: number; y: number }) => ({
+            x: (lm.x - 0.5) * 2,
+            y: -(lm.y - 0.5) * 2
+          });
+
+          const LS = toNDC(screenLandmarks[11]); // левое плечо
+          const RS = toNDC(screenLandmarks[12]); // правое плечо
+          const LH = toNDC(screenLandmarks[23]); // левое бедро
+          const RH = toNDC(screenLandmarks[24]); // правое бедро
+
+          const shoulderMid = {
+            x: (LS.x + RS.x) / 2,
+            y: (LS.y + RS.y) / 2
+          };
+          const hipMid = {
+            x: (LH.x + RH.x) / 2,
+            y: (LH.y + RH.y) / 2
           };
 
-          const avgShoulderZ = (worldLandmarks[11].z + worldLandmarks[12].z) / 2;
-
-          const LSw = unprojectPoint(screenLandmarks[11].x, screenLandmarks[11].y, avgShoulderZ);
-          const RSw = unprojectPoint(screenLandmarks[12].x, screenLandmarks[12].y, avgShoulderZ);
-          const LHw = unprojectPoint(screenLandmarks[23].x, screenLandmarks[23].y, avgShoulderZ);
-          const RHw = unprojectPoint(screenLandmarks[24].x, screenLandmarks[24].y, avgShoulderZ);
-
-          const shoulderWidthW = LSw.distanceTo(RSw);
-          const shoulderMidW = LSw.clone().add(RSw).multiplyScalar(0.5);
-          const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
-          const torsoHeightW = shoulderMidW.distanceTo(hipMidW);
+          const shoulderWidthNDC = Math.hypot(RS.x - LS.x, RS.y - LS.y);
+          const torsoHeightNDC = Math.hypot(
+            shoulderMid.x - hipMid.x,
+            shoulderMid.y - hipMid.y
+          );
 
           const naturalWidth = pivot.userData.naturalWidth as number;
           const naturalHeight = pivot.userData.naturalHeight as number;
-
-          const fitScaleX = debugFitScaleXRef.current;
-          const fitScaleY = debugFitScaleYRef.current;
-          const verticalOffset = debugVerticalOffsetRef.current;
-
-          // 🔑 нормализуем размер модели через максимальный размер bounding box
-          // это решает проблему когда модель в см, а Three.js единицы другие
           const maxNatural = Math.max(naturalWidth, naturalHeight);
-          const scaleX = (shoulderWidthW * fitScaleX) / (naturalWidth / maxNatural);
-          const scaleY = (torsoHeightW * fitScaleY) / (naturalHeight / maxNatural);
-          const scaleZ = scaleX * debugScaleZRef.current;
+
+          const fitScaleX = clothing?.fitScaleX ?? 1.3;
+          const fitScaleY = clothing?.fitScaleY ?? 1.1;
+          const verticalOffset = clothing?.verticalOffset ?? 0.3;
+
+          const scaleX = (shoulderWidthNDC * fitScaleX) / (naturalWidth / maxNatural);
+          const scaleY = (torsoHeightNDC * fitScaleY) / (naturalHeight / maxNatural);
+          const scaleZ = scaleX * 0.3;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          // 🔑 позиция = центр плеч, смещённый вниз на verticalOffset * высота торса
-          // (anchorEdge="center" → origin модели в центре, поэтому
-          //  при verticalOffset=0.5 центр модели совпадёт с центром торса)
-          const anchorW = shoulderMidW.clone();
-          anchorW.y -= verticalOffset * torsoHeightW;
-          pivot.position.copy(anchorW);
+          // позиция: центр плеч смещённый вниз на verticalOffset * высота торса
+          pivot.position.set(
+            shoulderMid.x,
+            shoulderMid.y - verticalOffset * torsoHeightNDC,
+            0
+          );
 
-          // 🔑 инвертируем Y: в MediaPipe worldLandmarks Y растёт вниз,
-          // в Three.js Y растёт вверх
-          const LS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
-          const RS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
-          const LH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
-          const RH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
+          // ориентация из worldLandmarks (инвертируем Y для совместимости с Three.js)
+          const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
+          const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
+          const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
+          const WRH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
 
           const rightVec = new THREE.Vector3(
-            LS.x - RS.x,
-            LS.y - RS.y,
-            LS.z - RS.z
+            WLS.x - WRS.x,
+            WLS.y - WRS.y,
+            WLS.z - WRS.z
           ).normalize();
 
           const upVec = new THREE.Vector3(
-            (LS.x + RS.x) / 2 - (LH.x + RH.x) / 2,
-            (LS.y + RS.y) / 2 - (LH.y + RH.y) / 2,
-            (LS.z + RS.z) / 2 - (LH.z + RH.z) / 2
+            (WLS.x + WRS.x) / 2 - (WLH.x + WRH.x) / 2,
+            (WLS.y + WRS.y) / 2 - (WLH.y + WRH.y) / 2,
+            (WLS.z + WRS.z) / 2 - (WLH.z + WRH.z) / 2
           ).normalize();
 
           const forwardVec = new THREE.Vector3()
             .crossVectors(rightVec, upVec)
             .normalize();
 
+          const bodyQ = new THREE.Quaternion().setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec)
+          );
+
+          // корректирующий поворот из clothes.ts
+          const rot = clothing?.modelRotationOffset;
           const correctionQ = new THREE.Quaternion().setFromEuler(
             new THREE.Euler(
-              THREE.MathUtils.degToRad(debugRotXRef.current),
-              THREE.MathUtils.degToRad(debugRotYRef.current),
-              THREE.MathUtils.degToRad(debugRotZRef.current)
+              THREE.MathUtils.degToRad(rot?.x ?? 0),
+              THREE.MathUtils.degToRad(rot?.y ?? 0),
+              THREE.MathUtils.degToRad(rot?.z ?? 0)
             )
           );
 
-          const rotMatrix = new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec);
-          const bodyQ = new THREE.Quaternion().setFromRotationMatrix(rotMatrix);
           pivot.quaternion.multiplyQuaternions(bodyQ, correctionQ);
-
           pivot.visible = true;
         } else if (garmentRef.current) {
           garmentRef.current.visible = false;
@@ -339,6 +331,7 @@ export default function CameraView(props: CameraViewProps) {
       cleanupResize?.();
       stream?.getTracks().forEach((t) => t.stop());
       renderer?.dispose();
+      sceneReadyRef.current = false;
     };
   }, []);
 
@@ -376,93 +369,6 @@ export default function CameraView(props: CameraViewProps) {
         <p style={{ position: "absolute", top: 10, left: 10, color: "#fff" }}>
           Loading pose model...
         </p>
-      )}
-
-      {debugMode && (
-        <div style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          width: "100%",
-          background: "rgba(0,0,0,0.82)",
-          color: "#fff",
-          padding: "12px 16px",
-          fontSize: 13,
-          fontFamily: "monospace",
-          boxSizing: "border-box",
-          maxHeight: "60vh",
-          overflowY: "auto"
-        }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-            <strong>DEBUG: {selectedClothing?.name ?? "—"}</strong>
-            <button onClick={() => setDebugMode(false)}>скрыть</button>
-          </div>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            fitScaleX (ширина): {debugFitScaleX.toFixed(2)}
-            <input type="range" min={0.1} max={5} step={0.05}
-              value={debugFitScaleX}
-              onChange={(e) => setDebugFitScaleX(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            fitScaleY (высота): {debugFitScaleY.toFixed(2)}
-            <input type="range" min={0.1} max={5} step={0.05}
-              value={debugFitScaleY}
-              onChange={(e) => setDebugFitScaleY(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            scaleZ (объём/глубина): {debugScaleZ.toFixed(2)}
-            <input type="range" min={0.05} max={2} step={0.05}
-              value={debugScaleZ}
-              onChange={(e) => setDebugScaleZ(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            verticalOffset (+ вниз / − вверх): {debugVerticalOffset.toFixed(2)}
-            <input type="range" min={-1} max={1} step={0.01}
-              value={debugVerticalOffset}
-              onChange={(e) => setDebugVerticalOffset(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            rotX: {debugRotX}°
-            <input type="range" min={-180} max={180} step={1}
-              value={debugRotX}
-              onChange={(e) => setDebugRotX(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            rotY: {debugRotY}°
-            <input type="range" min={-180} max={180} step={1}
-              value={debugRotY}
-              onChange={(e) => setDebugRotY(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <label style={{ display: "block", marginTop: 8 }}>
-            rotZ: {debugRotZ}°
-            <input type="range" min={-180} max={180} step={1}
-              value={debugRotZ}
-              onChange={(e) => setDebugRotZ(parseFloat(e.target.value))}
-              style={{ width: "100%" }} />
-          </label>
-
-          <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-            👉 скопируй в clothes.ts когда подберёшь:<br />
-            fitScaleX: {debugFitScaleX.toFixed(2)},
-            fitScaleY: {debugFitScaleY.toFixed(2)},
-            scaleZ: {debugScaleZ.toFixed(2)},
-            verticalOffset: {debugVerticalOffset.toFixed(2)},
-            modelRotationOffset: {`{ x: ${debugRotX}, y: ${debugRotY}, z: ${debugRotZ} }`}
-          </div>
-        </div>
       )}
     </div>
   );
