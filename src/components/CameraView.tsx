@@ -24,11 +24,12 @@ export default function CameraView(props: CameraViewProps) {
 
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const gltfSourceRef = useRef<THREE.Group | null>(null);
   const loadedModelUrlRef = useRef<string | null>(null);
+  const sceneReadyRef = useRef(false);
 
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
-  const sceneReadyRef = useRef(false);
 
   const { ready } = usePose(videoRef);
 
@@ -36,14 +37,11 @@ export default function CameraView(props: CameraViewProps) {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
 
-  // загрузка модели при смене одежды
   useEffect(() => {
     if (!selectedClothing) return;
-
     let cancelled = false;
 
     async function rebuild() {
-      // ждём пока сцена будет готова
       if (!sceneRef.current) return;
 
       if (loadedModelUrlRef.current !== selectedClothing!.model) {
@@ -56,7 +54,7 @@ export default function CameraView(props: CameraViewProps) {
       const pivot = buildPivot(
         gltfSourceRef.current,
         "center",
-        { x: 0, y: 0, z: 0 }
+        selectedClothing!.modelRotationOffset ?? {}
       );
 
       if (garmentRef.current) sceneRef.current.remove(garmentRef.current);
@@ -65,22 +63,18 @@ export default function CameraView(props: CameraViewProps) {
       garmentRef.current = pivot;
     }
 
-    // если сцена ещё не готова — ждём через интервал
-    const tryRebuild = () => {
-      if (sceneReadyRef.current) {
-        rebuild().catch(console.error);
-      } else {
-        const interval = setInterval(() => {
-          if (sceneReadyRef.current) {
-            clearInterval(interval);
-            rebuild().catch(console.error);
-          }
-        }, 100);
-        return () => clearInterval(interval);
-      }
-    };
+    if (sceneReadyRef.current) {
+      rebuild().catch(console.error);
+    } else {
+      const interval = setInterval(() => {
+        if (sceneReadyRef.current) {
+          clearInterval(interval);
+          rebuild().catch(console.error);
+        }
+      }, 50);
+      return () => clearInterval(interval);
+    }
 
-    tryRebuild();
     return () => { cancelled = true; };
   }, [selectedClothing]);
 
@@ -110,18 +104,22 @@ export default function CameraView(props: CameraViewProps) {
       await video.play();
 
       const scene = new THREE.Scene();
-      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
       dirLight.position.set(0, 2, 3);
       scene.add(dirLight);
+      const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
+      backLight.position.set(0, -1, -2);
+      scene.add(backLight);
 
-      // камера смотрит в (0,0,0) с позиции z=2
-      // объекты на z=0 в NDC координатах отображаются 1-к-1 на экран
       const w = container.clientWidth;
       const h = container.clientHeight;
-      const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
-      camera.position.set(0, 0, 2);
+      const FOV = 60;
+      const CAM_Z = 2;
+      const camera = new THREE.PerspectiveCamera(FOV, w / h, 0.01, 100);
+      camera.position.set(0, 0, CAM_Z);
       camera.lookAt(0, 0, 0);
+      cameraRef.current = camera;
 
       renderer = new THREE.WebGLRenderer({
         canvas: threeCanvasRef.current!,
@@ -129,6 +127,7 @@ export default function CameraView(props: CameraViewProps) {
         antialias: true
       });
       renderer.setClearColor(0x000000, 0);
+      renderer.shadowMap.enabled = true;
 
       sceneRef.current = scene;
       sceneReadyRef.current = true;
@@ -190,6 +189,19 @@ export default function CameraView(props: CameraViewProps) {
         z: lm.z
       });
 
+      // 🔑 правильный unproject: экранные coords (0-1) → world coords
+      // учитывает FOV и aspect ratio в отличие от прямого NDC
+      const screenToWorld = (nx: number, ny: number): THREE.Vector3 => {
+        const ndcX = (nx - 0.5) * 2;
+        const ndcY = -(ny - 0.5) * 2;
+
+        // вычисляем размер вьюпорта на плоскости z=0
+        const halfH = CAM_Z * Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+        const halfW = halfH * camera.aspect;
+
+        return new THREE.Vector3(ndcX * halfW, ndcY * halfH, 0);
+      };
+
       const detect = () => {
         const poseLandmarker = getPoseLandmarker();
         if (!poseLandmarker) {
@@ -209,7 +221,6 @@ export default function CameraView(props: CameraViewProps) {
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
-        // рисуем скелет
         if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
           const adjusted = screenLandmarks.map((lm) => {
@@ -227,64 +238,46 @@ export default function CameraView(props: CameraViewProps) {
           const pivot = garmentRef.current;
           const clothing = selectedClothingRef.current;
 
-          // 🔑 ПРОСТОЙ СПОСОБ: screenLandmarks (0..1) → NDC (-1..1)
-          // x: 0..1 → -1..1
-          // y: 0..1 → 1..-1 (инвертируем Y — в экране Y вниз, в NDC вверх)
-          const toNDC = (lm: { x: number; y: number }) => ({
-            x: (lm.x - 0.5) * 2,
-            y: -(lm.y - 0.5) * 2
-          });
+          // 🔑 переводим screen coords → world coords с учётом FOV и aspect
+          const LSw = screenToWorld(screenLandmarks[11].x, screenLandmarks[11].y);
+          const RSw = screenToWorld(screenLandmarks[12].x, screenLandmarks[12].y);
+          const LHw = screenToWorld(screenLandmarks[23].x, screenLandmarks[23].y);
+          const RHw = screenToWorld(screenLandmarks[24].x, screenLandmarks[24].y);
 
-          const LS = toNDC(screenLandmarks[11]); // левое плечо
-          const RS = toNDC(screenLandmarks[12]); // правое плечо
-          const LH = toNDC(screenLandmarks[23]); // левое бедро
-          const RH = toNDC(screenLandmarks[24]); // правое бедро
+          const shoulderWidthW = LSw.distanceTo(RSw);
+          const shoulderMidW = LSw.clone().add(RSw).multiplyScalar(0.5);
+          const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
+          const torsoHeightW = shoulderMidW.distanceTo(hipMidW);
 
-          const shoulderMid = {
-            x: (LS.x + RS.x) / 2,
-            y: (LS.y + RS.y) / 2
-          };
-          const hipMid = {
-            x: (LH.x + RH.x) / 2,
-            y: (LH.y + RH.y) / 2
-          };
-
-          const shoulderWidthNDC = Math.hypot(RS.x - LS.x, RS.y - LS.y);
-          const torsoHeightNDC = Math.hypot(
-            shoulderMid.x - hipMid.x,
-            shoulderMid.y - hipMid.y
-          );
-
+          // naturalWidth теперь нормализован (0-1), fitScale = множитель
           const naturalWidth = pivot.userData.naturalWidth as number;
           const naturalHeight = pivot.userData.naturalHeight as number;
-          const maxNatural = Math.max(naturalWidth, naturalHeight);
 
           const fitScaleX = clothing?.fitScaleX ?? 1.3;
           const fitScaleY = clothing?.fitScaleY ?? 1.1;
           const verticalOffset = clothing?.verticalOffset ?? 0.3;
 
-          const scaleX = (shoulderWidthNDC * fitScaleX) / (naturalWidth / maxNatural);
-          const scaleY = (torsoHeightNDC * fitScaleY) / (naturalHeight / maxNatural);
+          const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
+          const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
           const scaleZ = scaleX * 0.3;
+
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          // позиция: центр плеч смещённый вниз на verticalOffset * высота торса
-          pivot.position.set(
-            shoulderMid.x,
-            shoulderMid.y - verticalOffset * torsoHeightNDC,
-            0
-          );
+          // позиция: центр плеч смещённый вниз
+          const anchorPos = shoulderMidW.clone();
+          anchorPos.y -= verticalOffset * torsoHeightW;
+          pivot.position.copy(anchorPos);
 
-          // ориентация из worldLandmarks (инвертируем Y для совместимости с Three.js)
+          // ориентация из worldLandmarks (Y инвертируем: MediaPipe Y↓, Three.js Y↑)
           const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
           const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
           const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
           const WRH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
 
           const rightVec = new THREE.Vector3(
-            WLS.x - WRS.x,
-            WLS.y - WRS.y,
-            WLS.z - WRS.z
+            WRS.x - WLS.x,
+            WRS.y - WLS.y,
+            WRS.z - WLS.z
           ).normalize();
 
           const upVec = new THREE.Vector3(
@@ -301,7 +294,6 @@ export default function CameraView(props: CameraViewProps) {
             new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec)
           );
 
-          // корректирующий поворот из clothes.ts
           const rot = clothing?.modelRotationOffset;
           const correctionQ = new THREE.Quaternion().setFromEuler(
             new THREE.Euler(
@@ -313,6 +305,7 @@ export default function CameraView(props: CameraViewProps) {
 
           pivot.quaternion.multiplyQuaternions(bodyQ, correctionQ);
           pivot.visible = true;
+
         } else if (garmentRef.current) {
           garmentRef.current.visible = false;
         }
