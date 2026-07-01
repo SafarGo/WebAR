@@ -5,7 +5,6 @@ import type { AnchorEdge, ModelRotationOffset } from "../data/clothes";
 const loader = new GLTFLoader();
 const sourceCache = new Map<string, THREE.Group>();
 
-/** Загружает (с кэшем) исходную сцену .glb без какой-либо обработки. */
 export async function loadGarmentSource(url: string): Promise<THREE.Group> {
   let source = sourceCache.get(url);
   if (!source) {
@@ -16,12 +15,6 @@ export async function loadGarmentSource(url: string): Promise<THREE.Group> {
   return source;
 }
 
-/**
- * Строит "pivot" из уже загруженной сцены: применяет корректирующий поворот
- * (если модель экспортирована в "неправильной" ориентации), затем выставляет
- * origin (0,0,0) на нужный край bounding box — ПОСЛЕ поворота, поэтому
- * ширина/высота для fitScale считаются уже с учётом коррекции.
- */
 export function buildPivot(
   source: THREE.Group,
   anchorEdge: AnchorEdge = "top",
@@ -29,6 +22,7 @@ export function buildPivot(
 ): THREE.Group {
   const mesh = source.clone(true);
 
+  // корректирующий поворот модели (если экспортирована в неправильной ориентации)
   mesh.rotation.set(
     THREE.MathUtils.degToRad(rotationOffsetDeg.x ?? 0),
     THREE.MathUtils.degToRad(rotationOffsetDeg.y ?? 0),
@@ -42,6 +36,7 @@ export function buildPivot(
   const center = new THREE.Vector3();
   box.getCenter(center);
 
+  // origin pivot-группы = нужный край bounding box модели
   let anchorY: number;
   if (anchorEdge === "top") anchorY = box.max.y;
   else if (anchorEdge === "bottom") anchorY = box.min.y;
@@ -51,6 +46,8 @@ export function buildPivot(
 
   const pivot = new THREE.Group();
   pivot.add(mesh);
+
+  // naturalWidth в единицах модели (метры, если экспортировано корректно)
   pivot.userData.naturalWidth = size.x || 1;
   pivot.userData.naturalHeight = size.y || 1;
 
