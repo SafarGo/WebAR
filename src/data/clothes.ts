@@ -31,6 +31,6 @@ export const clothes: ClothingItem[] = [
     anchor: "shoulders",
     anchorEdge: "top",
     verticalOffset: 0.1,
-    modelRotationOffset: { x: 180, y: 0, z: 0 }
+    modelRotationOffset: { x: 0, y: 0, z: 0 }
   }
 ];
