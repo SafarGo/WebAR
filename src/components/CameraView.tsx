@@ -12,8 +12,9 @@ interface CameraViewProps {
   selectedClothing: ClothingItem | null;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export default function CameraView({ selectedClothing }: CameraViewProps) {
+export default function CameraView(props: CameraViewProps) {
+  void props;
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -23,6 +24,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
   useEffect(() => {
     let animationId: number;
     let stream: MediaStream | undefined;
+    let cleanupResize: (() => void) | undefined;
 
     async function startCamera() {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -55,6 +57,7 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
       resizeCanvas();
       window.addEventListener("resize", resizeCanvas);
+      cleanupResize = () => window.removeEventListener("resize", resizeCanvas);
 
       const drawVideoCover = () => {
         const vw = video.videoWidth;
@@ -104,11 +107,15 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         const crop = drawVideoCover();
+        if (!crop) {
+          animationId = requestAnimationFrame(detect);
+          return;
+        }
 
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
-        if (screenLandmarks && crop) {
+        if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
 
           const adjusted = screenLandmarks.map((lm) => {
@@ -116,7 +123,6 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             return { ...lm, x: p.x / canvas.width, y: p.y / canvas.height };
           });
 
-          // стандартный скелет по экранным координатам
           drawingUtils.drawLandmarks(adjusted, {
             color: "#00FF00",
             radius: 4
@@ -126,61 +132,58 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
             lineWidth: 2
           });
 
-          // 🔑 дополнительно рисуем ключевые точки из worldLandmarks,
-          // спроецированные обратно через screenLandmarks — чтобы видеть,
-          // что трекер "знает" о 3D-положении плеч и бёдер
           if (worldLandmarks) {
             const keyPoints = [
-              { idx: 11, label: "L.shoulder" },
-              { idx: 12, label: "R.shoulder" },
+              { idx: 11, label: "L.sh" },
+              { idx: 12, label: "R.sh" },
               { idx: 23, label: "L.hip" },
               { idx: 24, label: "R.hip" }
             ];
+
+            const fontSize = Math.round(canvas.width / 45);
+            ctx.font = `${fontSize}px monospace`;
 
             keyPoints.forEach(({ idx, label }) => {
               const screen = toCanvasPoint(screenLandmarks[idx], crop);
               const world = worldLandmarks[idx];
 
-              // красный круг на ключевой точке
               ctx.beginPath();
               ctx.arc(screen.x, screen.y, 8, 0, Math.PI * 2);
-              ctx.fillStyle = "rgba(255, 0, 0, 0.8)";
+              ctx.fillStyle = "rgba(255, 0, 0, 0.85)";
               ctx.fill();
 
-              // подпись с 3D-координатами в метрах
               ctx.fillStyle = "#fff";
-              ctx.font = `${Math.round(canvas.width / 40)}px monospace`;
               ctx.fillText(
-                `${label} x:${world.x.toFixed(2)} y:${world.y.toFixed(2)} z:${world.z.toFixed(2)}`,
-                screen.x + 10,
-                screen.y
+                `${label} (${world.x.toFixed(2)}, ${world.y.toFixed(2)}, ${world.z.toFixed(2)})`,
+                screen.x + 12,
+                screen.y + 4
               );
             });
 
-            // линия между плечами
+            // линия между плечами + ширина в метрах
             const ls = toCanvasPoint(screenLandmarks[11], crop);
             const rs = toCanvasPoint(screenLandmarks[12], crop);
+
             ctx.beginPath();
             ctx.moveTo(ls.x, ls.y);
             ctx.lineTo(rs.x, rs.y);
-            ctx.strokeStyle = "rgba(255, 100, 0, 0.9)";
+            ctx.strokeStyle = "orange";
             ctx.lineWidth = 3;
             ctx.stroke();
 
-            // ширина плеч в метрах поверх линии
             const wL = worldLandmarks[11];
             const wR = worldLandmarks[12];
             const shoulderWidthM = Math.hypot(
               wR.x - wL.x,
               wR.y - wL.y,
               wR.z - wL.z
-            ).toFixed(3);
+            );
 
             const midX = (ls.x + rs.x) / 2;
-            const midY = (ls.y + rs.y) / 2;
+            const midY = (ls.y + rs.y) / 2 - 12;
             ctx.fillStyle = "orange";
             ctx.font = `bold ${Math.round(canvas.width / 35)}px monospace`;
-            ctx.fillText(`${shoulderWidthM}m`, midX, midY - 10);
+            ctx.fillText(`${shoulderWidthM.toFixed(3)}m`, midX, midY);
           }
         }
 
@@ -194,8 +197,8 @@ export default function CameraView({ selectedClothing }: CameraViewProps) {
 
     return () => {
       cancelAnimationFrame(animationId);
+      cleanupResize?.();
       stream?.getTracks().forEach((t) => t.stop());
-      window.removeEventListener("resize", () => {});
     };
   }, []);
 
