@@ -54,10 +54,16 @@ export default function CameraView(props: CameraViewProps) {
   const debugFitScaleXRef = useRef(debugFitScaleX);
   const debugFitScaleYRef = useRef(debugFitScaleY);
   const debugVerticalOffsetRef = useRef(debugVerticalOffset);
+  const debugRotXRef = useRef(debugRotX);
+  const debugRotYRef = useRef(debugRotY);
+  const debugRotZRef = useRef(debugRotZ);
 
   useEffect(() => { debugFitScaleXRef.current = debugFitScaleX; }, [debugFitScaleX]);
   useEffect(() => { debugFitScaleYRef.current = debugFitScaleY; }, [debugFitScaleY]);
   useEffect(() => { debugVerticalOffsetRef.current = debugVerticalOffset; }, [debugVerticalOffset]);
+  useEffect(() => { debugRotXRef.current = debugRotX; }, [debugRotX]);
+  useEffect(() => { debugRotYRef.current = debugRotY; }, [debugRotY]);
+  useEffect(() => { debugRotZRef.current = debugRotZ; }, [debugRotZ]);
 
   const { ready } = usePose(videoRef);
 
@@ -80,11 +86,7 @@ export default function CameraView(props: CameraViewProps) {
       const pivot = buildPivot(
         gltfSourceRef.current,
         selectedClothing!.anchorEdge ?? "top",
-        {
-          x: debugRotX,
-          y: debugRotY,
-          z: debugRotZ
-        }
+        { x: 0, y: 0, z: 0 } // поворот теперь управляется через Euler в detect()
       );
 
       if (garmentRef.current) sceneRef.current.remove(garmentRef.current);
@@ -95,7 +97,7 @@ export default function CameraView(props: CameraViewProps) {
 
     rebuild().catch(console.error);
     return () => { cancelled = true; };
-  }, [selectedClothing, sceneReady, debugRotX, debugRotY, debugRotZ]);
+  }, [selectedClothing, sceneReady]);
 
   useEffect(() => {
     let animationId: number;
@@ -274,30 +276,14 @@ export default function CameraView(props: CameraViewProps) {
           torsoCenterW.y -= verticalOffset * torsoHeightW;
           pivot.position.copy(torsoCenterW);
 
-          // 🔑 ориентация: инвертируем rightVec чтобы forwardVec смотрел к камере
-          const LS = worldLandmarks[11];
-          const RS = worldLandmarks[12];
-          const LH = worldLandmarks[23];
-          const RH = worldLandmarks[24];
-
-          const rightVec = new THREE.Vector3(
-            LS.x - RS.x,
-            LS.y - RS.y,
-            LS.z - RS.z
-          ).normalize();
-
-          const upVec = new THREE.Vector3(
-            (LS.x + RS.x) / 2 - (LH.x + RH.x) / 2,
-            (LS.y + RS.y) / 2 - (LH.y + RH.y) / 2,
-            (LS.z + RS.z) / 2 - (LH.z + RH.z) / 2
-          ).normalize();
-
-          const forwardVec = new THREE.Vector3()
-            .crossVectors(rightVec, upVec)
-            .normalize();
-
-          const rotMatrix = new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec);
-          pivot.quaternion.setFromRotationMatrix(rotMatrix);
+          // 🔑 ДИАГНОСТИКА: фиксированный Euler поворот через слайдеры
+          // Найди углы при которых модель стоит правильно (лицом к тебе, не перевёрнута)
+          // Потом скажи мне эти значения — встрою их в makeBasis для отслеживания поворота тела
+          pivot.quaternion.setFromEuler(new THREE.Euler(
+            THREE.MathUtils.degToRad(debugRotXRef.current),
+            THREE.MathUtils.degToRad(debugRotYRef.current),
+            THREE.MathUtils.degToRad(debugRotZRef.current)
+          ));
 
           pivot.visible = true;
         } else if (garmentRef.current) {
@@ -402,7 +388,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
-            modelRotation.x: {debugRotX}°
+            rotX: {debugRotX}°
             <input type="range" min={-180} max={180} step={1}
               value={debugRotX}
               onChange={(e) => setDebugRotX(parseFloat(e.target.value))}
@@ -410,7 +396,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
-            modelRotation.y: {debugRotY}°
+            rotY: {debugRotY}°
             <input type="range" min={-180} max={180} step={1}
               value={debugRotY}
               onChange={(e) => setDebugRotY(parseFloat(e.target.value))}
@@ -418,7 +404,7 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <label style={{ display: "block", marginTop: 8 }}>
-            modelRotation.z: {debugRotZ}°
+            rotZ: {debugRotZ}°
             <input type="range" min={-180} max={180} step={1}
               value={debugRotZ}
               onChange={(e) => setDebugRotZ(parseFloat(e.target.value))}
@@ -426,11 +412,10 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-            👉 скопируй в clothes.ts когда подберёшь:<br />
-            fitScaleX: {debugFitScaleX.toFixed(2)},
-            fitScaleY: {debugFitScaleY.toFixed(2)},
-            verticalOffset: {debugVerticalOffset.toFixed(2)},
-            modelRotationOffset: {`{ x: ${debugRotX}, y: ${debugRotY}, z: ${debugRotZ} }`}
+            👉 найди углы при которых модель стоит правильно и скажи мне:<br />
+            rotX: {debugRotX}°, rotY: {debugRotY}°, rotZ: {debugRotZ}°<br />
+            fitScaleX: {debugFitScaleX.toFixed(2)}, fitScaleY: {debugFitScaleY.toFixed(2)},
+            verticalOffset: {debugVerticalOffset.toFixed(2)}
           </div>
         </div>
       )}
