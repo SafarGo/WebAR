@@ -84,9 +84,11 @@ export default function CameraView(props: CameraViewProps) {
       }
       if (cancelled || !sceneRef.current || !gltfSourceRef.current) return;
 
+      // 🔑 "center" — origin в центре модели, не на верхнем крае
+      // Это позволяет правильно позиционировать по центру плеч
       const pivot = buildPivot(
         gltfSourceRef.current,
-        selectedClothing!.anchorEdge ?? "top",
+        "center",
         { x: 0, y: 0, z: 0 }
       );
 
@@ -268,14 +270,20 @@ export default function CameraView(props: CameraViewProps) {
           const fitScaleY = debugFitScaleYRef.current;
           const verticalOffset = debugVerticalOffsetRef.current;
 
-          const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
-          const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
+          // 🔑 нормализуем размер модели через максимальный размер bounding box
+          // это решает проблему когда модель в см, а Three.js единицы другие
+          const maxNatural = Math.max(naturalWidth, naturalHeight);
+          const scaleX = (shoulderWidthW * fitScaleX) / (naturalWidth / maxNatural);
+          const scaleY = (torsoHeightW * fitScaleY) / (naturalHeight / maxNatural);
           const scaleZ = scaleX * debugScaleZRef.current;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
-          const torsoCenterW = shoulderMidW.clone().add(hipMidW).multiplyScalar(0.5);
-          torsoCenterW.y -= verticalOffset * torsoHeightW;
-          pivot.position.copy(torsoCenterW);
+          // 🔑 позиция = центр плеч, смещённый вниз на verticalOffset * высота торса
+          // (anchorEdge="center" → origin модели в центре, поэтому
+          //  при verticalOffset=0.5 центр модели совпадёт с центром торса)
+          const anchorW = shoulderMidW.clone();
+          anchorW.y -= verticalOffset * torsoHeightW;
+          pivot.position.copy(anchorW);
 
           // 🔑 инвертируем Y: в MediaPipe worldLandmarks Y растёт вниз,
           // в Three.js Y растёт вверх
@@ -392,7 +400,7 @@ export default function CameraView(props: CameraViewProps) {
 
           <label style={{ display: "block", marginTop: 8 }}>
             fitScaleX (ширина): {debugFitScaleX.toFixed(2)}
-            <input type="range" min={0.5} max={3} step={0.05}
+            <input type="range" min={0.1} max={5} step={0.05}
               value={debugFitScaleX}
               onChange={(e) => setDebugFitScaleX(parseFloat(e.target.value))}
               style={{ width: "100%" }} />
@@ -400,7 +408,7 @@ export default function CameraView(props: CameraViewProps) {
 
           <label style={{ display: "block", marginTop: 8 }}>
             fitScaleY (высота): {debugFitScaleY.toFixed(2)}
-            <input type="range" min={0.5} max={3} step={0.05}
+            <input type="range" min={0.1} max={5} step={0.05}
               value={debugFitScaleY}
               onChange={(e) => setDebugFitScaleY(parseFloat(e.target.value))}
               style={{ width: "100%" }} />
@@ -416,7 +424,7 @@ export default function CameraView(props: CameraViewProps) {
 
           <label style={{ display: "block", marginTop: 8 }}>
             verticalOffset (+ вниз / − вверх): {debugVerticalOffset.toFixed(2)}
-            <input type="range" min={-0.5} max={0.5} step={0.01}
+            <input type="range" min={-1} max={1} step={0.01}
               value={debugVerticalOffset}
               onChange={(e) => setDebugVerticalOffset(parseFloat(e.target.value))}
               style={{ width: "100%" }} />
