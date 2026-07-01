@@ -31,7 +31,6 @@ export default function CameraView(props: CameraViewProps) {
   const [sceneReady, setSceneReady] = useState(false);
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
 
-  // 🛠 DEBUG
   const [debugMode, setDebugMode] = useState(true);
   const [lastClothingId, setLastClothingId] = useState(selectedClothing?.id ?? null);
   const [debugFitScaleX, setDebugFitScaleX] = useState(selectedClothing?.fitScaleX ?? 1.3);
@@ -71,7 +70,6 @@ export default function CameraView(props: CameraViewProps) {
     selectedClothingRef.current = selectedClothing;
   }, [selectedClothing]);
 
-  // загрузка + сборка pivot
   useEffect(() => {
     if (!selectedClothing || !sceneRef.current) return;
     let cancelled = false;
@@ -86,7 +84,7 @@ export default function CameraView(props: CameraViewProps) {
       const pivot = buildPivot(
         gltfSourceRef.current,
         selectedClothing!.anchorEdge ?? "top",
-        { x: 0, y: 0, z: 0 } // поворот теперь управляется через Euler в detect()
+        { x: 0, y: 0, z: 0 }
       );
 
       if (garmentRef.current) sceneRef.current.remove(garmentRef.current);
@@ -269,21 +267,50 @@ export default function CameraView(props: CameraViewProps) {
 
           const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
           const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
-          const scaleZ = (scaleX + scaleY) / 2;
+          // 🔑 глубина = 30% от ширины — реальные пропорции футболки
+          const scaleZ = scaleX * 0.3;
           pivot.scale.set(scaleX, scaleY, scaleZ);
 
           const torsoCenterW = shoulderMidW.clone().add(hipMidW).multiplyScalar(0.5);
           torsoCenterW.y -= verticalOffset * torsoHeightW;
           pivot.position.copy(torsoCenterW);
 
-          // 🔑 ДИАГНОСТИКА: фиксированный Euler поворот через слайдеры
-          // Найди углы при которых модель стоит правильно (лицом к тебе, не перевёрнута)
-          // Потом скажи мне эти значения — встрою их в makeBasis для отслеживания поворота тела
-          pivot.quaternion.setFromEuler(new THREE.Euler(
-            THREE.MathUtils.degToRad(debugRotXRef.current),
-            THREE.MathUtils.degToRad(debugRotYRef.current),
-            THREE.MathUtils.degToRad(debugRotZRef.current)
-          ));
+          // 🔑 ориентация: базис из скелета + корректирующий поворот
+          const LS = worldLandmarks[11];
+          const RS = worldLandmarks[12];
+          const LH = worldLandmarks[23];
+          const RH = worldLandmarks[24];
+
+          const rightVec = new THREE.Vector3(
+            LS.x - RS.x,
+            LS.y - RS.y,
+            LS.z - RS.z
+          ).normalize();
+
+          const upVec = new THREE.Vector3(
+            (LS.x + RS.x) / 2 - (LH.x + RH.x) / 2,
+            (LS.y + RS.y) / 2 - (LH.y + RH.y) / 2,
+            (LS.z + RS.z) / 2 - (LH.z + RH.z) / 2
+          ).normalize();
+
+          const forwardVec = new THREE.Vector3()
+            .crossVectors(rightVec, upVec)
+            .normalize();
+
+          // корректирующий поворот из слайдеров (при 0,0,0 = единичный quaternion)
+          const correctionQ = new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(
+              THREE.MathUtils.degToRad(debugRotXRef.current),
+              THREE.MathUtils.degToRad(debugRotYRef.current),
+              THREE.MathUtils.degToRad(debugRotZRef.current)
+            )
+          );
+
+          const rotMatrix = new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec);
+          const bodyQ = new THREE.Quaternion().setFromRotationMatrix(rotMatrix);
+
+          // итоговый поворот = поворот тела × коррекция
+          pivot.quaternion.multiplyQuaternions(bodyQ, correctionQ);
 
           pivot.visible = true;
         } else if (garmentRef.current) {
@@ -412,10 +439,11 @@ export default function CameraView(props: CameraViewProps) {
           </label>
 
           <div style={{ marginTop: 10, fontSize: 11, opacity: 0.7 }}>
-            👉 найди углы при которых модель стоит правильно и скажи мне:<br />
-            rotX: {debugRotX}°, rotY: {debugRotY}°, rotZ: {debugRotZ}°<br />
-            fitScaleX: {debugFitScaleX.toFixed(2)}, fitScaleY: {debugFitScaleY.toFixed(2)},
-            verticalOffset: {debugVerticalOffset.toFixed(2)}
+            👉 скопируй в clothes.ts когда подберёшь:<br />
+            fitScaleX: {debugFitScaleX.toFixed(2)},
+            fitScaleY: {debugFitScaleY.toFixed(2)},
+            verticalOffset: {debugVerticalOffset.toFixed(2)},
+            modelRotationOffset: {`{ x: ${debugRotX}, y: ${debugRotY}, z: ${debugRotZ} }`}
           </div>
         </div>
       )}
