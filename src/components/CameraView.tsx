@@ -12,6 +12,7 @@ export default function CameraView(props: CameraViewProps) {
   const { selectedClothing } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<"idle" | "loading-tracker" | "loading-model" | "loading-camera" | "running" | "error">("idle");
+  const [errorMessage, setErrorMessage] = useState<string>("");
   const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
   const stopCameraRef = useRef<(() => void) | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -58,11 +59,9 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       const tracker = trackerRef.current!;
-
       const w = container.clientWidth;
       const h = container.clientHeight;
 
-      // 🔑 запрашиваем заднюю камеру сами
       setStatus("loading-camera");
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -72,7 +71,6 @@ export default function CameraView(props: CameraViewProps) {
         }
       });
 
-      // показываем видео в контейнере
       const videoEl = document.createElement("video");
       videoEl.srcObject = stream;
       videoEl.muted = true;
@@ -88,7 +86,6 @@ export default function CameraView(props: CameraViewProps) {
       container.insertBefore(videoEl, container.firstChild);
       await videoEl.play();
 
-      // Three.js сцена
       const scene = new THREE.Scene();
       scene.add(new THREE.AmbientLight(0xffffff, 1.2));
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -130,7 +127,6 @@ export default function CameraView(props: CameraViewProps) {
       });
       resizeObserver.observe(container);
 
-      // загрузка модели
       setStatus("loading-model");
       const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
 
@@ -144,16 +140,13 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       if (!rig) {
-        setStatus("error");
-        console.error("Арматура не найдена. Назови объект арматуры 'rig' в Blender.");
-        return;
+        throw new Error("Арматура не найдена. Назови объект арматуры 'rig' в Blender.");
       }
 
       scene.add(gltf.scene);
       const binding = tracker.bind(rig);
 
-      // 🔑 перехватываем getUserMedia — трекер вызовет его внутри tracker.start()
-      // подсовываем ему наш уже готовый stream с задней камерой
+      // 🔑 перехватываем getUserMedia чтобы трекер использовал нашу заднюю камеру
       const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
         navigator.mediaDevices
       );
@@ -161,7 +154,6 @@ export default function CameraView(props: CameraViewProps) {
 
       const cameraHandle = await tracker.start();
 
-      // восстанавливаем оригинальный getUserMedia
       navigator.mediaDevices.getUserMedia = originalGetUserMedia;
 
       stopCameraRef.current = () => {
@@ -183,6 +175,7 @@ export default function CameraView(props: CameraViewProps) {
 
     } catch (e) {
       console.error("Ошибка запуска:", e);
+      setErrorMessage(e instanceof Error ? e.message : String(e));
       setStatus("error");
     }
   };
@@ -278,13 +271,28 @@ export default function CameraView(props: CameraViewProps) {
           alignItems: "center",
           justifyContent: "center",
           gap: 16,
-          zIndex: 10
+          zIndex: 10,
+          padding: "0 24px"
         }}>
-          <p style={{ color: "#ff4444", fontSize: 18 }}>
+          <p style={{ color: "#ff4444", fontSize: 18, textAlign: "center" }}>
             Что-то пошло не так
           </p>
+          {errorMessage && (
+            <p style={{
+              color: "rgba(255,255,255,0.6)",
+              fontSize: 13,
+              textAlign: "center",
+              fontFamily: "monospace",
+              maxWidth: 320
+            }}>
+              {errorMessage}
+            </p>
+          )}
           <button
-            onClick={() => setStatus("idle")}
+            onClick={() => {
+              setStatus("idle");
+              setErrorMessage("");
+            }}
             style={{
               padding: "12px 28px",
               fontSize: 15,
@@ -292,7 +300,8 @@ export default function CameraView(props: CameraViewProps) {
               border: "none",
               background: "#fff",
               cursor: "pointer",
-              fontWeight: 600
+              fontWeight: 600,
+              marginTop: 8
             }}
           >
             Попробовать снова
