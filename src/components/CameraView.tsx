@@ -11,13 +11,12 @@ interface CameraViewProps {
 export default function CameraView(props: CameraViewProps) {
   const { selectedClothing } = props;
   const containerRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<"idle" | "loading" | "running" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "loading-tracker" | "loading-model" | "loading-camera" | "running" | "error">("idle");
   const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
   const stopCameraRef = useRef<(() => void) | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const animationIdRef = useRef<number>(0);
 
-  // инициализируем трекер заранее (без камеры)
   useEffect(() => {
     let cancelled = false;
 
@@ -41,13 +40,26 @@ export default function CameraView(props: CameraViewProps) {
   }, []);
 
   const handleStart = async () => {
-    if (!selectedClothing || !trackerRef.current || !containerRef.current) return;
+    if (!selectedClothing || !containerRef.current) return;
 
-    setStatus("loading");
     const container = containerRef.current;
-    const tracker = trackerRef.current;
 
     try {
+      // если трекер ещё не загрузился — ждём
+      if (!trackerRef.current) {
+        setStatus("loading-tracker");
+        await new Promise<void>((resolve) => {
+          const interval = setInterval(() => {
+            if (trackerRef.current) {
+              clearInterval(interval);
+              resolve();
+            }
+          }, 100);
+        });
+      }
+
+      const tracker = trackerRef.current!;
+
       const w = container.clientWidth;
       const h = container.clientHeight;
 
@@ -91,6 +103,7 @@ export default function CameraView(props: CameraViewProps) {
       });
       resizeObserver.observe(container);
 
+      setStatus("loading-model");
       const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
 
       let rig = gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined;
@@ -109,9 +122,9 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       scene.add(gltf.scene);
-
       const binding = tracker.bind(rig);
 
+      setStatus("loading-camera");
       const cameraHandle = await tracker.start();
       stopCameraRef.current = () => cameraHandle.stop();
 
@@ -140,6 +153,14 @@ export default function CameraView(props: CameraViewProps) {
     };
   }, []);
 
+  const statusLabel: Record<string, string> = {
+    "loading-tracker": "Загрузка трекера...",
+    "loading-model":   "Загрузка модели одежды...",
+    "loading-camera":  "Запрос доступа к камере...",
+  };
+
+  const isLoading = status.startsWith("loading");
+
   return (
     <div
       ref={containerRef}
@@ -153,7 +174,61 @@ export default function CameraView(props: CameraViewProps) {
         background: "#000"
       }}
     >
-      {status === "idle" && (
+      {(status === "idle" || isLoading) && (
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 20,
+          zIndex: 10
+        }}>
+          {/* спиннер — показывается только во время загрузки */}
+          {isLoading && (
+            <div style={{
+              width: 48,
+              height: 48,
+              border: "4px solid rgba(255,255,255,0.2)",
+              borderTopColor: "#fff",
+              borderRadius: "50%",
+              animation: "spin 0.8s linear infinite"
+            }} />
+          )}
+
+          <p style={{
+            color: "#fff",
+            fontSize: 16,
+            opacity: 0.85,
+            textAlign: "center",
+            padding: "0 24px"
+          }}>
+            {isLoading ? statusLabel[status] : "Нажми чтобы начать примерку"}
+          </p>
+
+          <button
+            onClick={handleStart}
+            disabled={isLoading}
+            style={{
+              padding: "14px 32px",
+              fontSize: 16,
+              borderRadius: 12,
+              border: "none",
+              background: isLoading ? "rgba(255,255,255,0.3)" : "#fff",
+              color: isLoading ? "rgba(0,0,0,0.4)" : "#000",
+              cursor: isLoading ? "not-allowed" : "pointer",
+              fontWeight: 600,
+              transition: "all 0.2s",
+              minWidth: 200
+            }}
+          >
+            {isLoading ? "Загрузка..." : "Включить камеру"}
+          </button>
+        </div>
+      )}
+
+      {status === "error" && (
         <div style={{
           position: "absolute",
           inset: 0,
@@ -164,14 +239,14 @@ export default function CameraView(props: CameraViewProps) {
           gap: 16,
           zIndex: 10
         }}>
-          <p style={{ color: "#fff", fontSize: 18 }}>
-            Нажми чтобы начать примерку
+          <p style={{ color: "#ff4444", fontSize: 18 }}>
+            Что-то пошло не так
           </p>
           <button
-            onClick={handleStart}
+            onClick={() => setStatus("idle")}
             style={{
-              padding: "14px 32px",
-              fontSize: 16,
+              padding: "12px 28px",
+              fontSize: 15,
               borderRadius: 12,
               border: "none",
               background: "#fff",
@@ -179,40 +254,17 @@ export default function CameraView(props: CameraViewProps) {
               fontWeight: 600
             }}
           >
-            Включить камеру
+            Попробовать снова
           </button>
         </div>
       )}
 
-      {status === "loading" && (
-        <div style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 10
-        }}>
-          <p style={{ color: "#fff", fontSize: 18 }}>
-            Загрузка модели...
-          </p>
-        </div>
-      )}
-
-      {status === "error" && (
-        <div style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          zIndex: 10
-        }}>
-          <p style={{ color: "red", fontSize: 18 }}>
-            Ошибка. Проверь консоль браузера.
-          </p>
-        </div>
-      )}
+      {/* CSS анимация спиннера */}
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
