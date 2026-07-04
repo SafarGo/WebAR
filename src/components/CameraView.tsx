@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { setupTracker } from "three-mediapipe-rig";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -11,19 +11,43 @@ interface CameraViewProps {
 export default function CameraView(props: CameraViewProps) {
   const { selectedClothing } = props;
   const containerRef = useRef<HTMLDivElement>(null);
-  const mountedRef = useRef(false);
+  const [status, setStatus] = useState<"idle" | "loading" | "running" | "error">("idle");
+  const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
+  const stopCameraRef = useRef<(() => void) | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const animationIdRef = useRef<number>(0);
 
+  // инициализируем трекер заранее (без камеры)
   useEffect(() => {
-    if (mountedRef.current) return;
-    mountedRef.current = true;
+    let cancelled = false;
 
-    let stopped = false;
-    let stopCamera: (() => void) | undefined;
-    let renderer: THREE.WebGLRenderer | undefined;
-    let animationId: number;
+    async function initTracker() {
+      try {
+        const tracker = await setupTracker({
+          ignoreLegs: true,
+          ignoreFace: true,
+          displayScale: 1,
+        });
+        if (!cancelled) {
+          trackerRef.current = tracker;
+        }
+      } catch (e) {
+        console.error("Ошибка инициализации трекера:", e);
+      }
+    }
 
-    async function init() {
-      const container = containerRef.current!;
+    initTracker();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleStart = async () => {
+    if (!selectedClothing || !trackerRef.current || !containerRef.current) return;
+
+    setStatus("loading");
+    const container = containerRef.current;
+    const tracker = trackerRef.current;
+
+    try {
       const w = container.clientWidth;
       const h = container.clientHeight;
 
@@ -42,9 +66,11 @@ export default function CameraView(props: CameraViewProps) {
       threeCanvas.style.top = "0";
       threeCanvas.style.left = "0";
       threeCanvas.style.pointerEvents = "none";
+      threeCanvas.style.width = `${w}px`;
+      threeCanvas.style.height = `${h}px`;
       container.appendChild(threeCanvas);
 
-      renderer = new THREE.WebGLRenderer({
+      const renderer = new THREE.WebGLRenderer({
         canvas: threeCanvas,
         alpha: true,
         antialias: true
@@ -52,11 +78,12 @@ export default function CameraView(props: CameraViewProps) {
       renderer.setClearColor(0x000000, 0);
       renderer.setSize(w, h);
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      rendererRef.current = renderer;
 
       const resizeObserver = new ResizeObserver(() => {
         const cw = container.clientWidth;
         const ch = container.clientHeight;
-        renderer!.setSize(cw, ch);
+        renderer.setSize(cw, ch);
         camera.aspect = cw / ch;
         camera.updateProjectionMatrix();
         threeCanvas.style.width = `${cw}px`;
@@ -64,23 +91,9 @@ export default function CameraView(props: CameraViewProps) {
       });
       resizeObserver.observe(container);
 
-      const tracker = await setupTracker({
-        ignoreLegs: true,
-        ignoreFace: true,
-        displayScale: 1,
-      });
-
-      if (stopped) return;
-
-      if (!selectedClothing) return;
-
       const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
 
-      if (stopped) return;
-
-      // ищем арматуру по имени "rig", иначе берём первый SkinnedMesh
       let rig = gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined;
-
       if (!rig) {
         gltf.scene.traverse((obj) => {
           if ((obj as THREE.SkinnedMesh).isSkinnedMesh && !rig) {
@@ -90,9 +103,8 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       if (!rig) {
-        console.error(
-          "Арматура не найдена. Назови объект арматуры 'rig' в Blender."
-        );
+        setStatus("error");
+        console.error("Арматура не найдена. Назови объект арматуры 'rig' в Blender.");
         return;
       }
 
@@ -101,35 +113,32 @@ export default function CameraView(props: CameraViewProps) {
       const binding = tracker.bind(rig);
 
       const cameraHandle = await tracker.start();
-      stopCamera = () => cameraHandle.stop();
+      stopCameraRef.current = () => cameraHandle.stop();
 
-      if (stopped) {
-        stopCamera();
-        return;
-      }
+      setStatus("running");
 
       const clock = new THREE.Clock();
-
       const animate = () => {
-        animationId = requestAnimationFrame(animate);
+        animationIdRef.current = requestAnimationFrame(animate);
         const delta = clock.getDelta();
         binding.update(delta);
-        renderer!.render(scene, camera);
+        renderer.render(scene, camera);
       };
-
       animate();
+
+    } catch (e) {
+      console.error("Ошибка запуска камеры:", e);
+      setStatus("error");
     }
+  };
 
-    init().catch(console.error);
-
+  useEffect(() => {
     return () => {
-      stopped = true;
-      stopCamera?.();
-      cancelAnimationFrame(animationId);
-      renderer?.dispose();
-      mountedRef.current = false;
+      if (stopCameraRef.current) stopCameraRef.current();
+      cancelAnimationFrame(animationIdRef.current);
+      if (rendererRef.current) rendererRef.current.dispose();
     };
-  }, [selectedClothing]);
+  }, []);
 
   return (
     <div
@@ -140,8 +149,70 @@ export default function CameraView(props: CameraViewProps) {
         left: 0,
         width: "100vw",
         height: "100vh",
-        overflow: "hidden"
+        overflow: "hidden",
+        background: "#000"
       }}
-    />
+    >
+      {status === "idle" && (
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 16,
+          zIndex: 10
+        }}>
+          <p style={{ color: "#fff", fontSize: 18 }}>
+            Нажми чтобы начать примерку
+          </p>
+          <button
+            onClick={handleStart}
+            style={{
+              padding: "14px 32px",
+              fontSize: 16,
+              borderRadius: 12,
+              border: "none",
+              background: "#fff",
+              cursor: "pointer",
+              fontWeight: 600
+            }}
+          >
+            Включить камеру
+          </button>
+        </div>
+      )}
+
+      {status === "loading" && (
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 10
+        }}>
+          <p style={{ color: "#fff", fontSize: 18 }}>
+            Загрузка модели...
+          </p>
+        </div>
+      )}
+
+      {status === "error" && (
+        <div style={{
+          position: "absolute",
+          inset: 0,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 10
+        }}>
+          <p style={{ color: "red", fontSize: 18 }}>
+            Ошибка. Проверь консоль браузера.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
