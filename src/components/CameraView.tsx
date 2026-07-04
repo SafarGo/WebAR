@@ -45,7 +45,6 @@ export default function CameraView(props: CameraViewProps) {
     const container = containerRef.current;
 
     try {
-      // если трекер ещё не загрузился — ждём
       if (!trackerRef.current) {
         setStatus("loading-tracker");
         await new Promise<void>((resolve) => {
@@ -63,6 +62,33 @@ export default function CameraView(props: CameraViewProps) {
       const w = container.clientWidth;
       const h = container.clientHeight;
 
+      // 🔑 запрашиваем заднюю камеру сами
+      setStatus("loading-camera");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      // показываем видео в контейнере
+      const videoEl = document.createElement("video");
+      videoEl.srcObject = stream;
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+      videoEl.setAttribute("playsinline", "");
+      videoEl.style.position = "absolute";
+      videoEl.style.top = "0";
+      videoEl.style.left = "0";
+      videoEl.style.width = "100%";
+      videoEl.style.height = "100%";
+      videoEl.style.objectFit = "cover";
+      videoEl.style.zIndex = "0";
+      container.insertBefore(videoEl, container.firstChild);
+      await videoEl.play();
+
+      // Three.js сцена
       const scene = new THREE.Scene();
       scene.add(new THREE.AmbientLight(0xffffff, 1.2));
       const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
@@ -80,6 +106,7 @@ export default function CameraView(props: CameraViewProps) {
       threeCanvas.style.pointerEvents = "none";
       threeCanvas.style.width = `${w}px`;
       threeCanvas.style.height = `${h}px`;
+      threeCanvas.style.zIndex = "1";
       container.appendChild(threeCanvas);
 
       const renderer = new THREE.WebGLRenderer({
@@ -103,6 +130,7 @@ export default function CameraView(props: CameraViewProps) {
       });
       resizeObserver.observe(container);
 
+      // загрузка модели
       setStatus("loading-model");
       const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
 
@@ -124,9 +152,23 @@ export default function CameraView(props: CameraViewProps) {
       scene.add(gltf.scene);
       const binding = tracker.bind(rig);
 
-      setStatus("loading-camera");
+      // 🔑 перехватываем getUserMedia — трекер вызовет его внутри tracker.start()
+      // подсовываем ему наш уже готовый stream с задней камерой
+      const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
+        navigator.mediaDevices
+      );
+      navigator.mediaDevices.getUserMedia = async () => stream;
+
       const cameraHandle = await tracker.start();
-      stopCameraRef.current = () => cameraHandle.stop();
+
+      // восстанавливаем оригинальный getUserMedia
+      navigator.mediaDevices.getUserMedia = originalGetUserMedia;
+
+      stopCameraRef.current = () => {
+        cameraHandle.stop();
+        stream.getTracks().forEach(t => t.stop());
+        videoEl.remove();
+      };
 
       setStatus("running");
 
@@ -140,7 +182,7 @@ export default function CameraView(props: CameraViewProps) {
       animate();
 
     } catch (e) {
-      console.error("Ошибка запуска камеры:", e);
+      console.error("Ошибка запуска:", e);
       setStatus("error");
     }
   };
@@ -155,8 +197,8 @@ export default function CameraView(props: CameraViewProps) {
 
   const statusLabel: Record<string, string> = {
     "loading-tracker": "Загрузка трекера...",
-    "loading-model":   "Загрузка модели одежды...",
-    "loading-camera":  "Запрос доступа к камере...",
+    "loading-model": "Загрузка модели одежды...",
+    "loading-camera": "Запрос доступа к камере...",
   };
 
   const isLoading = status.startsWith("loading");
@@ -185,7 +227,6 @@ export default function CameraView(props: CameraViewProps) {
           gap: 20,
           zIndex: 10
         }}>
-          {/* спиннер — показывается только во время загрузки */}
           {isLoading && (
             <div style={{
               width: 48,
@@ -259,7 +300,6 @@ export default function CameraView(props: CameraViewProps) {
         </div>
       )}
 
-      {/* CSS анимация спиннера */}
       <style>{`
         @keyframes spin {
           to { transform: rotate(360deg); }
