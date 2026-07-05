@@ -13,23 +13,16 @@ export default function CameraView(props: CameraViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<"idle" | "loading-tracker" | "loading-model" | "loading-camera" | "running" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState<string>("");
-  const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
   const stopCameraRef = useRef<(() => void) | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const animationIdRef = useRef<number>(0);
-
-  const addLog = (msg: string) => {
-    console.log(msg);
-    setDebugLogs(prev => [...prev.slice(-10), msg]);
-  };
 
   useEffect(() => {
     let cancelled = false;
 
     async function initTracker() {
       try {
-        addLog("Инициализация трекера...");
         const tracker = await setupTracker({
           ignoreLegs: true,
           ignoreFace: true,
@@ -37,10 +30,9 @@ export default function CameraView(props: CameraViewProps) {
         });
         if (!cancelled) {
           trackerRef.current = tracker;
-          addLog("✅ Трекер готов");
         }
       } catch (e) {
-        addLog("❌ Ошибка трекера: " + String(e));
+        console.error("Ошибка инициализации трекера:", e);
       }
     }
 
@@ -56,7 +48,6 @@ export default function CameraView(props: CameraViewProps) {
     try {
       if (!trackerRef.current) {
         setStatus("loading-tracker");
-        addLog("Ожидание трекера...");
         await new Promise<void>((resolve) => {
           const interval = setInterval(() => {
             if (trackerRef.current) {
@@ -71,8 +62,8 @@ export default function CameraView(props: CameraViewProps) {
       const w = container.clientWidth;
       const h = container.clientHeight;
 
+      // запрашиваем заднюю камеру сами
       setStatus("loading-camera");
-      addLog("Запрос камеры...");
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "environment" },
@@ -80,8 +71,8 @@ export default function CameraView(props: CameraViewProps) {
           height: { ideal: 720 }
         }
       });
-      addLog("✅ Камера получена");
 
+      // наше видео — слой 0 (фон)
       const videoEl = document.createElement("video");
       videoEl.srcObject = stream;
       videoEl.muted = true;
@@ -96,7 +87,17 @@ export default function CameraView(props: CameraViewProps) {
       videoEl.style.zIndex = "0";
       container.insertBefore(videoEl, container.firstChild);
       await videoEl.play();
-      addLog("✅ Видео запущено");
+
+      // Three.js canvas — слой 1 (модель поверх видео)
+      const threeCanvas = document.createElement("canvas");
+      threeCanvas.style.position = "absolute";
+      threeCanvas.style.top = "0";
+      threeCanvas.style.left = "0";
+      threeCanvas.style.pointerEvents = "none";
+      threeCanvas.style.width = `${w}px`;
+      threeCanvas.style.height = `${h}px`;
+      threeCanvas.style.zIndex = "1";
+      container.appendChild(threeCanvas);
 
       const scene = new THREE.Scene();
       scene.add(new THREE.AmbientLight(0xffffff, 1.2));
@@ -107,16 +108,6 @@ export default function CameraView(props: CameraViewProps) {
       const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
       camera.position.set(0, 0, 2);
       camera.lookAt(0, 0, 0);
-
-      const threeCanvas = document.createElement("canvas");
-      threeCanvas.style.position = "absolute";
-      threeCanvas.style.top = "0";
-      threeCanvas.style.left = "0";
-      threeCanvas.style.pointerEvents = "none";
-      threeCanvas.style.width = `${w}px`;
-      threeCanvas.style.height = `${h}px`;
-      threeCanvas.style.zIndex = "2";
-      container.appendChild(threeCanvas);
 
       const renderer = new THREE.WebGLRenderer({
         canvas: threeCanvas,
@@ -139,17 +130,9 @@ export default function CameraView(props: CameraViewProps) {
       });
       resizeObserver.observe(container);
 
+      // загрузка модели
       setStatus("loading-model");
-      addLog("Загрузка модели: " + selectedClothing.model);
       const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
-      addLog("✅ Модель загружена");
-
-      // выводим структуру на экран
-      const objects: string[] = [];
-      gltf.scene.traverse((obj) => {
-        objects.push(`${obj.type} | ${obj.name} | skinned:${(obj as THREE.SkinnedMesh).isSkinnedMesh ?? false}`);
-      });
-      addLog("Объекты: " + objects.slice(0, 5).join(" / "));
 
       let rig =
         gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined ??
@@ -164,45 +147,38 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       if (!rig) {
-        throw new Error("Арматура не найдена. Объекты: " + objects.join(", "));
+        throw new Error("Арматура не найдена. Переименуй объект арматуры в 'rig' в Blender.");
       }
-
-      addLog("✅ Арматура: " + rig.name + " (" + rig.type + ")");
 
       scene.add(gltf.scene);
       const binding = tracker.bind(rig);
-      addLog("✅ Binding создан");
 
+      // подсовываем трекеру наш stream с задней камерой
       const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
         navigator.mediaDevices
       );
       navigator.mediaDevices.getUserMedia = async () => stream;
 
-      addLog("Запуск трекера...");
       const cameraHandle = await tracker.start();
-      navigator.mediaDevices.getUserMedia = originalGetUserMedia;
-      addLog("✅ Трекер запущен");
 
+      navigator.mediaDevices.getUserMedia = originalGetUserMedia;
+
+      // 🔑 скрываем всё что добавил трекер (его видео и canvas)
+      // оставляем только наше видео и наш Three.js canvas
       setTimeout(() => {
-        const allCanvases = container.querySelectorAll("canvas");
-        allCanvases.forEach((c) => {
-          if (c !== threeCanvas) {
-            c.style.position = "absolute";
-            c.style.top = "0";
-            c.style.left = "0";
-            c.style.width = "100%";
-            c.style.height = "100%";
-            c.style.zIndex = "1";
-            c.style.pointerEvents = "none";
+        const allElements = container.querySelectorAll("video, canvas");
+        allElements.forEach((el) => {
+          if (el !== videoEl && el !== threeCanvas) {
+            (el as HTMLElement).style.display = "none";
           }
         });
-        addLog("✅ Canvas настроены");
-      }, 500);
+      }, 200);
 
       stopCameraRef.current = () => {
         cameraHandle.stop();
         stream.getTracks().forEach(t => t.stop());
         videoEl.remove();
+        threeCanvas.remove();
       };
 
       setStatus("running");
@@ -218,7 +194,11 @@ export default function CameraView(props: CameraViewProps) {
 
     } catch (e) {
       console.error("Ошибка запуска:", e);
-      setErrorMessage(e instanceof Error ? e.message : String(e));
+      if (e instanceof Error && e.name === "NotAllowedError") {
+        setErrorMessage("Нет доступа к камере. Разреши доступ: нажми AA в адресной строке Safari → Настройки сайта → Камера → Разрешить");
+      } else {
+        setErrorMessage(e instanceof Error ? e.message : String(e));
+      }
       setStatus("error");
     }
   };
@@ -305,28 +285,6 @@ export default function CameraView(props: CameraViewProps) {
         </div>
       )}
 
-      {/* debug лог — показывается всегда поверх камеры */}
-      {debugLogs.length > 0 && status !== "error" && (
-        <div style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          background: "rgba(0,0,0,0.75)",
-          color: "#0f0",
-          fontSize: 11,
-          fontFamily: "monospace",
-          padding: "8px 12px",
-          zIndex: 20,
-          maxHeight: "40vh",
-          overflowY: "auto"
-        }}>
-          {debugLogs.map((log, i) => (
-            <div key={i}>{log}</div>
-          ))}
-        </div>
-      )}
-
       {status === "error" && (
         <div style={{
           position: "absolute",
@@ -344,11 +302,12 @@ export default function CameraView(props: CameraViewProps) {
           </p>
           {errorMessage && (
             <p style={{
-              color: "rgba(255,255,255,0.6)",
+              color: "rgba(255,255,255,0.8)",
               fontSize: 13,
               textAlign: "center",
               fontFamily: "monospace",
-              maxWidth: 320
+              maxWidth: 320,
+              lineHeight: 1.5
             }}>
               {errorMessage}
             </p>
@@ -357,7 +316,6 @@ export default function CameraView(props: CameraViewProps) {
             onClick={() => {
               setStatus("idle");
               setErrorMessage("");
-              setDebugLogs([]);
             }}
             style={{
               padding: "12px 28px",
