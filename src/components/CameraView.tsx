@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import * as THREE from "three";
+import {
+  DrawingUtils,
+  PoseLandmarker
+} from "@mediapipe/tasks-vision";
 import { setupTracker } from "three-mediapipe-rig";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+
+import { usePose } from "../hooks/usePose";
+import { getPoseLandmarker } from "../services/poseService";
 import type { ClothingItem } from "../data/clothes";
 
 interface CameraViewProps {
@@ -10,14 +17,27 @@ interface CameraViewProps {
 
 export default function CameraView(props: CameraViewProps) {
   const { selectedClothing } = props;
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<"idle" | "loading-tracker" | "loading-model" | "loading-camera" | "running" | "error">("idle");
-  const [errorMessage, setErrorMessage] = useState<string>("");
-  const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
-  const stopCameraRef = useRef<(() => void) | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const animationIdRef = useRef<number>(0);
 
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const threeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const garmentRef = useRef<THREE.Group | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const sceneReadyRef = useRef(false);
+  const bindingRef = useRef<{ update: (delta: number) => void } | null>(null);
+  const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
+
+  const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
+  const { ready } = usePose(videoRef);
+
+  useEffect(() => {
+    selectedClothingRef.current = selectedClothing;
+  }, [selectedClothing]);
+
+  // инициализируем трекер только для binding — без запуска камеры
   useEffect(() => {
     let cancelled = false;
 
@@ -26,7 +46,6 @@ export default function CameraView(props: CameraViewProps) {
         const tracker = await setupTracker({
           ignoreLegs: true,
           ignoreFace: true,
-          displayScale: 1,
         });
         if (!cancelled) {
           trackerRef.current = tracker;
@@ -40,99 +59,15 @@ export default function CameraView(props: CameraViewProps) {
     return () => { cancelled = true; };
   }, []);
 
-  const handleStart = async () => {
-    if (!selectedClothing || !containerRef.current) return;
+  // загрузка модели
+  useEffect(() => {
+    if (!selectedClothing || !sceneRef.current || !trackerRef.current) return;
+    let cancelled = false;
 
-    const container = containerRef.current;
+    async function loadModel() {
+      const gltf = await new GLTFLoader().loadAsync(selectedClothing!.model);
 
-    try {
-      if (!trackerRef.current) {
-        setStatus("loading-tracker");
-        await new Promise<void>((resolve) => {
-          const interval = setInterval(() => {
-            if (trackerRef.current) {
-              clearInterval(interval);
-              resolve();
-            }
-          }, 100);
-        });
-      }
-
-      const tracker = trackerRef.current!;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
-
-      // запрашиваем заднюю камеру сами
-      setStatus("loading-camera");
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        }
-      });
-
-      // наше видео — слой 0 (фон)
-      const videoEl = document.createElement("video");
-      videoEl.srcObject = stream;
-      videoEl.muted = true;
-      videoEl.playsInline = true;
-      videoEl.setAttribute("playsinline", "");
-      videoEl.style.position = "absolute";
-      videoEl.style.top = "0";
-      videoEl.style.left = "0";
-      videoEl.style.width = "100%";
-      videoEl.style.height = "100%";
-      videoEl.style.objectFit = "cover";
-      videoEl.style.zIndex = "0";
-      container.insertBefore(videoEl, container.firstChild);
-      await videoEl.play();
-
-      // Three.js canvas — слой 1 (модель поверх видео)
-      const threeCanvas = document.createElement("canvas");
-      threeCanvas.style.position = "absolute";
-      threeCanvas.style.top = "0";
-      threeCanvas.style.left = "0";
-      threeCanvas.style.pointerEvents = "none";
-      threeCanvas.style.width = `${w}px`;
-      threeCanvas.style.height = `${h}px`;
-      threeCanvas.style.zIndex = "1";
-      container.appendChild(threeCanvas);
-
-      const scene = new THREE.Scene();
-      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
-      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-      dirLight.position.set(0, 2, 3);
-      scene.add(dirLight);
-
-      const camera = new THREE.PerspectiveCamera(60, w / h, 0.01, 100);
-      camera.position.set(0, 0, 2);
-      camera.lookAt(0, 0, 0);
-
-      const renderer = new THREE.WebGLRenderer({
-        canvas: threeCanvas,
-        alpha: true,
-        antialias: true
-      });
-      renderer.setClearColor(0x000000, 0);
-      renderer.setSize(w, h);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      rendererRef.current = renderer;
-
-      const resizeObserver = new ResizeObserver(() => {
-        const cw = container.clientWidth;
-        const ch = container.clientHeight;
-        renderer.setSize(cw, ch);
-        camera.aspect = cw / ch;
-        camera.updateProjectionMatrix();
-        threeCanvas.style.width = `${cw}px`;
-        threeCanvas.style.height = `${ch}px`;
-      });
-      resizeObserver.observe(container);
-
-      // загрузка модели
-      setStatus("loading-model");
-      const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
+      if (cancelled || !sceneRef.current || !trackerRef.current) return;
 
       let rig =
         gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined ??
@@ -147,77 +82,255 @@ export default function CameraView(props: CameraViewProps) {
       }
 
       if (!rig) {
-        throw new Error("Арматура не найдена. Переименуй объект арматуры в 'rig' в Blender.");
+        console.error("Арматура не найдена");
+        return;
       }
 
-      scene.add(gltf.scene);
-      const binding = tracker.bind(rig);
-
-      // подсовываем трекеру наш stream с задней камерой
-      const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(
-        navigator.mediaDevices
-      );
-      navigator.mediaDevices.getUserMedia = async () => stream;
-
-      const cameraHandle = await tracker.start();
-
-      navigator.mediaDevices.getUserMedia = originalGetUserMedia;
-
-      // 🔑 скрываем всё что добавил трекер (его видео и canvas)
-      // оставляем только наше видео и наш Three.js canvas
-      setTimeout(() => {
-        const allElements = container.querySelectorAll("video, canvas");
-        allElements.forEach((el) => {
-          if (el !== videoEl && el !== threeCanvas) {
-            (el as HTMLElement).style.display = "none";
-          }
-        });
-      }, 200);
-
-      stopCameraRef.current = () => {
-        cameraHandle.stop();
-        stream.getTracks().forEach(t => t.stop());
-        videoEl.remove();
-        threeCanvas.remove();
-      };
-
-      setStatus("running");
-
-      const clock = new THREE.Clock();
-      const animate = () => {
-        animationIdRef.current = requestAnimationFrame(animate);
-        const delta = clock.getDelta();
-        binding.update(delta);
-        renderer.render(scene, camera);
-      };
-      animate();
-
-    } catch (e) {
-      console.error("Ошибка запуска:", e);
-      if (e instanceof Error && e.name === "NotAllowedError") {
-        setErrorMessage("Нет доступа к камере. Разреши доступ: нажми AA в адресной строке Safari → Настройки сайта → Камера → Разрешить");
-      } else {
-        setErrorMessage(e instanceof Error ? e.message : String(e));
+      if (garmentRef.current) {
+        sceneRef.current.remove(garmentRef.current);
       }
-      setStatus("error");
+
+      sceneRef.current.add(gltf.scene);
+      garmentRef.current = gltf.scene;
+
+      // binding костей к трекеру — но трекер не запущен как камера
+      // он будет получать landmarks вручную от нашего MediaPipe
+      bindingRef.current = trackerRef.current.bind(rig);
     }
-  };
+
+    if (sceneReadyRef.current) {
+      loadModel().catch(console.error);
+    } else {
+      const interval = setInterval(() => {
+        if (sceneReadyRef.current && trackerRef.current) {
+          clearInterval(interval);
+          loadModel().catch(console.error);
+        }
+      }, 50);
+      return () => clearInterval(interval);
+    }
+
+    return () => { cancelled = true; };
+  }, [selectedClothing]);
 
   useEffect(() => {
+    let animationId: number;
+    let stream: MediaStream | undefined;
+    let cleanupResize: (() => void) | undefined;
+    let renderer: THREE.WebGLRenderer | undefined;
+
+    async function startCamera() {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      });
+
+      const video = videoRef.current!;
+      const canvas = canvasRef.current!;
+      const ctx = canvas.getContext("2d")!;
+      const container = containerRef.current!;
+
+      video.srcObject = stream;
+      video.muted = true;
+      video.playsInline = true;
+      await video.play();
+
+      const scene = new THREE.Scene();
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+      dirLight.position.set(0, 2, 3);
+      scene.add(dirLight);
+
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      const FOV = 60;
+      const CAM_Z = 2;
+      const threeCamera = new THREE.PerspectiveCamera(FOV, w / h, 0.01, 100);
+      threeCamera.position.set(0, 0, CAM_Z);
+      threeCamera.lookAt(0, 0, 0);
+      cameraRef.current = threeCamera;
+
+      renderer = new THREE.WebGLRenderer({
+        canvas: threeCanvasRef.current!,
+        alpha: true,
+        antialias: true
+      });
+      renderer.setClearColor(0x000000, 0);
+
+      sceneRef.current = scene;
+      sceneReadyRef.current = true;
+
+      const resizeCanvas = () => {
+        const cw = container.clientWidth;
+        const ch = container.clientHeight;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+        canvas.width = cw * dpr;
+        canvas.height = ch * dpr;
+        canvas.style.width = `${cw}px`;
+        canvas.style.height = `${ch}px`;
+
+        renderer!.setSize(cw, ch);
+        renderer!.setPixelRatio(dpr);
+
+        threeCamera.aspect = cw / ch;
+        threeCamera.updateProjectionMatrix();
+      };
+
+      resizeCanvas();
+      window.addEventListener("resize", resizeCanvas);
+      cleanupResize = () => window.removeEventListener("resize", resizeCanvas);
+
+      const drawVideoCover = () => {
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const cw = canvas.width;
+        const ch = canvas.height;
+        if (!vw || !vh) return null;
+
+        const videoRatio = vw / vh;
+        const canvasRatio = cw / ch;
+        let sx: number, sy: number, sWidth: number, sHeight: number;
+
+        if (videoRatio > canvasRatio) {
+          sHeight = vh;
+          sWidth = vh * canvasRatio;
+          sx = (vw - sWidth) / 2;
+          sy = 0;
+        } else {
+          sWidth = vw;
+          sHeight = vw / canvasRatio;
+          sx = 0;
+          sy = (vh - sHeight) / 2;
+        }
+
+        ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, cw, ch);
+        return { sx, sy, sWidth, sHeight };
+      };
+
+      const toCanvasPoint = (
+        lm: { x: number; y: number; z: number },
+        crop: { sx: number; sy: number; sWidth: number; sHeight: number }
+      ) => ({
+        x: ((lm.x * video.videoWidth - crop.sx) / crop.sWidth) * canvas.width,
+        y: ((lm.y * video.videoHeight - crop.sy) / crop.sHeight) * canvas.height,
+        z: lm.z
+      });
+
+      const screenToWorld = (nx: number, ny: number): THREE.Vector3 => {
+        const ndcX = (nx - 0.5) * 2;
+        const ndcY = -(ny - 0.5) * 2;
+        const halfH = CAM_Z * Math.tan(THREE.MathUtils.degToRad(FOV / 2));
+        const halfW = halfH * threeCamera.aspect;
+        return new THREE.Vector3(ndcX * halfW, ndcY * halfH, 0);
+      };
+
+      const clock = new THREE.Clock();
+
+      const detect = () => {
+        const poseLandmarker = getPoseLandmarker();
+        if (!poseLandmarker) {
+          animationId = requestAnimationFrame(detect);
+          return;
+        }
+
+        const results = poseLandmarker.detectForVideo(video, performance.now());
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const crop = drawVideoCover();
+        if (!crop) {
+          animationId = requestAnimationFrame(detect);
+          return;
+        }
+
+        const screenLandmarks = results.landmarks?.[0];
+        const worldLandmarks = results.worldLandmarks?.[0];
+
+        // рисуем скелет
+        if (screenLandmarks) {
+          const drawingUtils = new DrawingUtils(ctx);
+          const adjusted = screenLandmarks.map((lm) => {
+            const p = toCanvasPoint(lm, crop);
+            return { ...lm, x: p.x / canvas.width, y: p.y / canvas.height };
+          });
+          drawingUtils.drawLandmarks(adjusted, { color: "#00FF00", radius: 3 });
+          drawingUtils.drawConnectors(adjusted, PoseLandmarker.POSE_CONNECTIONS, {
+            color: "#00FF00",
+            lineWidth: 2
+          });
+        }
+
+        // обновляем кости через binding
+        if (bindingRef.current) {
+          const delta = clock.getDelta();
+          bindingRef.current.update(delta);
+        }
+
+        // позиционируем модель по скелету вручную
+        if (screenLandmarks && worldLandmarks && garmentRef.current) {
+          const clothing = selectedClothingRef.current;
+
+          const LSw = screenToWorld(screenLandmarks[11].x, screenLandmarks[11].y);
+          const RSw = screenToWorld(screenLandmarks[12].x, screenLandmarks[12].y);
+          const LHw = screenToWorld(screenLandmarks[23].x, screenLandmarks[23].y);
+          const RHw = screenToWorld(screenLandmarks[24].x, screenLandmarks[24].y);
+
+          const shoulderMidW = LSw.clone().add(RSw).multiplyScalar(0.5);
+          const hipMidW = LHw.clone().add(RHw).multiplyScalar(0.5);
+          const torsoHeightW = shoulderMidW.distanceTo(hipMidW);
+          const shoulderWidthW = LSw.distanceTo(RSw);
+
+          const verticalOffset = clothing?.verticalOffset ?? 0.3;
+          const fitScaleX = clothing?.fitScaleX ?? 1.0;
+
+          // масштаб модели относительно ширины плеч
+          const modelScale = shoulderWidthW * fitScaleX;
+          garmentRef.current.scale.setScalar(modelScale);
+
+          // позиция центра торса
+          const anchorPos = shoulderMidW.clone();
+          anchorPos.y -= verticalOffset * torsoHeightW;
+          garmentRef.current.position.copy(anchorPos);
+
+          // поворот из worldLandmarks
+          const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
+          const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
+          const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
+          const WRH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
+
+          const rightVec = new THREE.Vector3(WLS.x - WRS.x, WLS.y - WRS.y, WLS.z - WRS.z).normalize();
+          const upVec = new THREE.Vector3(
+            (WLS.x + WRS.x) / 2 - (WLH.x + WRH.x) / 2,
+            (WLS.y + WRS.y) / 2 - (WLH.y + WRH.y) / 2,
+            (WLS.z + WRS.z) / 2 - (WLH.z + WRH.z) / 2
+          ).normalize();
+          const forwardVec = new THREE.Vector3().crossVectors(rightVec, upVec).normalize();
+
+          garmentRef.current.quaternion.setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec)
+          );
+        }
+
+        renderer!.render(scene, threeCamera);
+        animationId = requestAnimationFrame(detect);
+      };
+
+      detect();
+    }
+
+    startCamera();
+
     return () => {
-      if (stopCameraRef.current) stopCameraRef.current();
-      cancelAnimationFrame(animationIdRef.current);
-      if (rendererRef.current) rendererRef.current.dispose();
+      cancelAnimationFrame(animationId);
+      cleanupResize?.();
+      stream?.getTracks().forEach(t => t.stop());
+      renderer?.dispose();
+      sceneReadyRef.current = false;
     };
   }, []);
-
-  const statusLabel: Record<string, string> = {
-    "loading-tracker": "Загрузка трекера...",
-    "loading-model": "Загрузка модели одежды...",
-    "loading-camera": "Запрос доступа к камере...",
-  };
-
-  const isLoading = status.startsWith("loading");
 
   return (
     <div
@@ -228,116 +341,32 @@ export default function CameraView(props: CameraViewProps) {
         left: 0,
         width: "100vw",
         height: "100vh",
-        overflow: "hidden",
-        background: "#000"
+        overflow: "hidden"
       }}
     >
-      {(status === "idle" || isLoading) && (
-        <div style={{
+      <video ref={videoRef} style={{ display: "none" }} />
+
+      <canvas
+        ref={canvasRef}
+        style={{ position: "absolute", top: 0, left: 0, display: "block" }}
+      />
+
+      <canvas
+        ref={threeCanvasRef}
+        style={{
           position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 20,
-          zIndex: 10
-        }}>
-          {isLoading && (
-            <div style={{
-              width: 48,
-              height: 48,
-              border: "4px solid rgba(255,255,255,0.2)",
-              borderTopColor: "#fff",
-              borderRadius: "50%",
-              animation: "spin 0.8s linear infinite"
-            }} />
-          )}
+          top: 0,
+          left: 0,
+          display: "block",
+          pointerEvents: "none"
+        }}
+      />
 
-          <p style={{
-            color: "#fff",
-            fontSize: 16,
-            opacity: 0.85,
-            textAlign: "center",
-            padding: "0 24px"
-          }}>
-            {isLoading ? statusLabel[status] : "Нажми чтобы начать примерку"}
-          </p>
-
-          <button
-            onClick={handleStart}
-            disabled={isLoading}
-            style={{
-              padding: "14px 32px",
-              fontSize: 16,
-              borderRadius: 12,
-              border: "none",
-              background: isLoading ? "rgba(255,255,255,0.3)" : "#fff",
-              color: isLoading ? "rgba(0,0,0,0.4)" : "#000",
-              cursor: isLoading ? "not-allowed" : "pointer",
-              fontWeight: 600,
-              transition: "all 0.2s",
-              minWidth: 200
-            }}
-          >
-            {isLoading ? "Загрузка..." : "Включить камеру"}
-          </button>
-        </div>
+      {!ready && (
+        <p style={{ position: "absolute", top: 10, left: 10, color: "#fff" }}>
+          Loading pose model...
+        </p>
       )}
-
-      {status === "error" && (
-        <div style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 16,
-          zIndex: 10,
-          padding: "0 24px"
-        }}>
-          <p style={{ color: "#ff4444", fontSize: 18, textAlign: "center" }}>
-            Что-то пошло не так
-          </p>
-          {errorMessage && (
-            <p style={{
-              color: "rgba(255,255,255,0.8)",
-              fontSize: 13,
-              textAlign: "center",
-              fontFamily: "monospace",
-              maxWidth: 320,
-              lineHeight: 1.5
-            }}>
-              {errorMessage}
-            </p>
-          )}
-          <button
-            onClick={() => {
-              setStatus("idle");
-              setErrorMessage("");
-            }}
-            style={{
-              padding: "12px 28px",
-              fontSize: 15,
-              borderRadius: 12,
-              border: "none",
-              background: "#fff",
-              cursor: "pointer",
-              fontWeight: 600,
-              marginTop: 8
-            }}
-          >
-            Попробовать снова
-          </button>
-        </div>
-      )}
-
-      <style>{`
-        @keyframes spin {
-          to { transform: rotate(360deg); }
-        }
-      `}</style>
     </div>
   );
 }
