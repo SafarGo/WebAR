@@ -25,6 +25,8 @@ export default function CameraView(props: CameraViewProps) {
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const naturalWidthRef = useRef<number>(1);
+  const naturalHeightRef = useRef<number>(1);
 
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
   const { ready } = usePose(videoRef);
@@ -105,12 +107,44 @@ export default function CameraView(props: CameraViewProps) {
       window.addEventListener("resize", resizeCanvas);
       cleanupResize = () => window.removeEventListener("resize", resizeCanvas);
 
-      // загрузка модели
+      // загрузка и нормализация модели
       if (selectedClothing) {
         try {
           const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
-          scene.add(gltf.scene);
-          garmentRef.current = gltf.scene;
+          const garment = gltf.scene;
+
+          // шаг 1 — считаем исходный bounding box
+          const box1 = new THREE.Box3().setFromObject(garment);
+          const size1 = new THREE.Vector3();
+          box1.getSize(size1);
+
+          // шаг 2 — нормализуем: максимальный размер = 1
+          // это убирает проблему единиц (см vs м vs условные единицы в GLB)
+          const maxDim = Math.max(size1.x, size1.y, size1.z, 0.001);
+          garment.scale.setScalar(1 / maxDim);
+          garment.updateMatrixWorld(true);
+
+          // шаг 3 — пересчитываем box после нормализации
+          const box2 = new THREE.Box3().setFromObject(garment);
+          const size2 = new THREE.Vector3();
+          box2.getSize(size2);
+          const center2 = new THREE.Vector3();
+          box2.getCenter(center2);
+
+          // шаг 4 — сдвигаем origin в верхний центр (линия плеч)
+          // теперь position = (0,0,0) будет совпадать с центром плеч
+          garment.position.set(
+            -center2.x,
+            -box2.max.y,
+            -center2.z
+          );
+
+          // сохраняем нормализованные размеры для расчёта scale в detect()
+          naturalWidthRef.current = size2.x || 1;
+          naturalHeightRef.current = size2.y || 1;
+
+          scene.add(garment);
+          garmentRef.current = garment;
         } catch (e) {
           console.error("Ошибка загрузки модели:", e);
         }
@@ -159,17 +193,6 @@ export default function CameraView(props: CameraViewProps) {
         const halfW = halfH * threeCamera.aspect;
         return new THREE.Vector3(ndcX * halfW, ndcY * halfH, 0);
       };
-
-      // считаем naturalSize один раз после загрузки
-      let naturalWidth = 1;
-      let naturalHeight = 1;
-      if (garmentRef.current) {
-        const box = new THREE.Box3().setFromObject(garmentRef.current);
-        const size = new THREE.Vector3();
-        box.getSize(size);
-        naturalWidth = size.x || 1;
-        naturalHeight = size.y || 1;
-      }
 
       const detect = () => {
         const poseLandmarker = getPoseLandmarker();
@@ -220,18 +243,20 @@ export default function CameraView(props: CameraViewProps) {
           const fitScaleY = clothing?.fitScaleY ?? 1.1;
           const verticalOffset = clothing?.verticalOffset ?? 0.3;
 
-          // 🔑 масштаб относительно naturalSize модели
-          const scaleX = (shoulderWidthW * fitScaleX) / naturalWidth;
-          const scaleY = (torsoHeightW * fitScaleY) / naturalHeight;
+          // 🔑 масштаб: нормализованная модель имеет naturalWidth ~ 0.6-0.8
+          // fitScaleX = 1.3 означает "ширина модели = 1.3x ширина плеч"
+          const scaleX = (shoulderWidthW * fitScaleX) / naturalWidthRef.current;
+          const scaleY = (torsoHeightW * fitScaleY) / naturalHeightRef.current;
           const scaleZ = scaleX * 0.3;
           garmentRef.current.scale.set(scaleX, scaleY, scaleZ);
 
-          // позиция
+          // 🔑 позиция: origin модели = верхний центр = линия плеч
+          // verticalOffset > 0 сдвигает вниз
           const anchorPos = shoulderMidW.clone();
           anchorPos.y -= verticalOffset * torsoHeightW;
           garmentRef.current.position.copy(anchorPos);
 
-          // ориентация
+          // ориентация из worldLandmarks (Y инвертируем: MediaPipe Y↓, Three.js Y↑)
           const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
           const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
           const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
@@ -249,7 +274,7 @@ export default function CameraView(props: CameraViewProps) {
             (WLS.z + WRS.z) / 2 - (WLH.z + WRH.z) / 2
           ).normalize();
 
-          // 🔑 upVec × rightVec — forwardVec смотрит к камере
+          // 🔑 upVec × rightVec = forwardVec к камере
           const forwardVec = new THREE.Vector3()
             .crossVectors(upVec, rightVec)
             .normalize();
