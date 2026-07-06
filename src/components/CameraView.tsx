@@ -4,7 +4,6 @@ import {
   DrawingUtils,
   PoseLandmarker
 } from "@mediapipe/tasks-vision";
-import { setupTracker } from "three-mediapipe-rig";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 import { usePose } from "../hooks/usePose";
@@ -26,91 +25,12 @@ export default function CameraView(props: CameraViewProps) {
   const garmentRef = useRef<THREE.Group | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const sceneReadyRef = useRef(false);
-  const bindingRef = useRef<{ update: (delta: number) => void } | null>(null);
-  const trackerRef = useRef<Awaited<ReturnType<typeof setupTracker>> | null>(null);
 
   const selectedClothingRef = useRef<ClothingItem | null>(selectedClothing);
   const { ready } = usePose(videoRef);
 
   useEffect(() => {
     selectedClothingRef.current = selectedClothing;
-  }, [selectedClothing]);
-
-  // инициализируем трекер только для binding — без запуска камеры
-  useEffect(() => {
-    let cancelled = false;
-
-    async function initTracker() {
-      try {
-        const tracker = await setupTracker({
-          ignoreLegs: true,
-          ignoreFace: true,
-        });
-        if (!cancelled) {
-          trackerRef.current = tracker;
-        }
-      } catch (e) {
-        console.error("Ошибка инициализации трекера:", e);
-      }
-    }
-
-    initTracker();
-    return () => { cancelled = true; };
-  }, []);
-
-  // загрузка модели
-  useEffect(() => {
-    if (!selectedClothing || !sceneRef.current || !trackerRef.current) return;
-    let cancelled = false;
-
-    async function loadModel() {
-      const gltf = await new GLTFLoader().loadAsync(selectedClothing!.model);
-
-      if (cancelled || !sceneRef.current || !trackerRef.current) return;
-
-      let rig =
-        gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined ??
-        gltf.scene.getObjectByName("Armature") as THREE.Object3D | undefined;
-
-      if (!rig) {
-        gltf.scene.traverse((obj) => {
-          if ((obj as THREE.SkinnedMesh).isSkinnedMesh && !rig) {
-            rig = obj.parent ?? obj;
-          }
-        });
-      }
-
-      if (!rig) {
-        console.error("Арматура не найдена");
-        return;
-      }
-
-      if (garmentRef.current) {
-        sceneRef.current.remove(garmentRef.current);
-      }
-
-      sceneRef.current.add(gltf.scene);
-      garmentRef.current = gltf.scene;
-
-      // binding костей к трекеру — но трекер не запущен как камера
-      // он будет получать landmarks вручную от нашего MediaPipe
-      bindingRef.current = trackerRef.current.bind(rig);
-    }
-
-    if (sceneReadyRef.current) {
-      loadModel().catch(console.error);
-    } else {
-      const interval = setInterval(() => {
-        if (sceneReadyRef.current && trackerRef.current) {
-          clearInterval(interval);
-          loadModel().catch(console.error);
-        }
-      }, 50);
-      return () => clearInterval(interval);
-    }
-
-    return () => { cancelled = true; };
   }, [selectedClothing]);
 
   useEffect(() => {
@@ -159,9 +79,7 @@ export default function CameraView(props: CameraViewProps) {
         antialias: true
       });
       renderer.setClearColor(0x000000, 0);
-
       sceneRef.current = scene;
-      sceneReadyRef.current = true;
 
       const resizeCanvas = () => {
         const cw = container.clientWidth;
@@ -183,6 +101,30 @@ export default function CameraView(props: CameraViewProps) {
       resizeCanvas();
       window.addEventListener("resize", resizeCanvas);
       cleanupResize = () => window.removeEventListener("resize", resizeCanvas);
+
+      // 🔑 грузим модель сразу, без каких-либо проверок
+      if (selectedClothing) {
+        try {
+          const gltf = await new GLTFLoader().loadAsync(selectedClothing.model);
+
+          let rig =
+            gltf.scene.getObjectByName("rig") as THREE.Object3D | undefined ??
+            gltf.scene.getObjectByName("Armature") as THREE.Object3D | undefined;
+
+          if (!rig) {
+            gltf.scene.traverse((obj) => {
+              if ((obj as THREE.SkinnedMesh).isSkinnedMesh && !rig) {
+                rig = obj.parent ?? obj;
+              }
+            });
+          }
+
+          scene.add(gltf.scene);
+          garmentRef.current = gltf.scene;
+        } catch (e) {
+          console.error("Ошибка загрузки модели:", e);
+        }
+      }
 
       const drawVideoCover = () => {
         const vw = video.videoWidth;
@@ -228,8 +170,6 @@ export default function CameraView(props: CameraViewProps) {
         return new THREE.Vector3(ndcX * halfW, ndcY * halfH, 0);
       };
 
-      const clock = new THREE.Clock();
-
       const detect = () => {
         const poseLandmarker = getPoseLandmarker();
         if (!poseLandmarker) {
@@ -249,7 +189,6 @@ export default function CameraView(props: CameraViewProps) {
         const screenLandmarks = results.landmarks?.[0];
         const worldLandmarks = results.worldLandmarks?.[0];
 
-        // рисуем скелет
         if (screenLandmarks) {
           const drawingUtils = new DrawingUtils(ctx);
           const adjusted = screenLandmarks.map((lm) => {
@@ -263,13 +202,6 @@ export default function CameraView(props: CameraViewProps) {
           });
         }
 
-        // обновляем кости через binding
-        if (bindingRef.current) {
-          const delta = clock.getDelta();
-          bindingRef.current.update(delta);
-        }
-
-        // позиционируем модель по скелету вручную
         if (screenLandmarks && worldLandmarks && garmentRef.current) {
           const clothing = selectedClothingRef.current;
 
@@ -286,28 +218,31 @@ export default function CameraView(props: CameraViewProps) {
           const verticalOffset = clothing?.verticalOffset ?? 0.3;
           const fitScaleX = clothing?.fitScaleX ?? 1.0;
 
-          // масштаб модели относительно ширины плеч
           const modelScale = shoulderWidthW * fitScaleX;
           garmentRef.current.scale.setScalar(modelScale);
 
-          // позиция центра торса
           const anchorPos = shoulderMidW.clone();
           anchorPos.y -= verticalOffset * torsoHeightW;
           garmentRef.current.position.copy(anchorPos);
 
-          // поворот из worldLandmarks
           const WLS = { x: worldLandmarks[11].x, y: -worldLandmarks[11].y, z: worldLandmarks[11].z };
           const WRS = { x: worldLandmarks[12].x, y: -worldLandmarks[12].y, z: worldLandmarks[12].z };
           const WLH = { x: worldLandmarks[23].x, y: -worldLandmarks[23].y, z: worldLandmarks[23].z };
           const WRH = { x: worldLandmarks[24].x, y: -worldLandmarks[24].y, z: worldLandmarks[24].z };
 
-          const rightVec = new THREE.Vector3(WLS.x - WRS.x, WLS.y - WRS.y, WLS.z - WRS.z).normalize();
+          const rightVec = new THREE.Vector3(
+            WLS.x - WRS.x, WLS.y - WRS.y, WLS.z - WRS.z
+          ).normalize();
+
           const upVec = new THREE.Vector3(
             (WLS.x + WRS.x) / 2 - (WLH.x + WRH.x) / 2,
             (WLS.y + WRS.y) / 2 - (WLH.y + WRH.y) / 2,
             (WLS.z + WRS.z) / 2 - (WLH.z + WRH.z) / 2
           ).normalize();
-          const forwardVec = new THREE.Vector3().crossVectors(rightVec, upVec).normalize();
+
+          const forwardVec = new THREE.Vector3()
+            .crossVectors(rightVec, upVec)
+            .normalize();
 
           garmentRef.current.quaternion.setFromRotationMatrix(
             new THREE.Matrix4().makeBasis(rightVec, upVec, forwardVec)
@@ -328,9 +263,8 @@ export default function CameraView(props: CameraViewProps) {
       cleanupResize?.();
       stream?.getTracks().forEach(t => t.stop());
       renderer?.dispose();
-      sceneReadyRef.current = false;
     };
-  }, []);
+  }, [selectedClothing]);
 
   return (
     <div
